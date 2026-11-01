@@ -3,7 +3,7 @@ import type { EditorState, Rect, AnnotationLayer } from '../../domain/editor-sta
 import { createEditorState, clampCrop, rotatedDimensions, isStrokePointRedundant } from '../../domain/editor-state'
 import { renderEditor, schedulePreview, planRenderDimensions, PREVIEW_MAX_EDGE, type DecodedSource } from '../../application/editor-renderer'
 import { createBrowserCanvasFactory } from '../../infrastructure/editor-canvas'
-import { mapPointerToSource, mapSourceRectToViewport, createCropGesture, updateCropGesture, computeCursorAnchoredPan, type CropHandle, type CropGesture } from '../image-editor-model'
+import { mapPointerToSource, mapSourceRectToViewport, createCropGesture, updateCropGesture, computeCursorAnchoredPan, clampZoom, isNearActualSize, type CropHandle, type CropGesture } from '../image-editor-model'
 import type { ActiveTool } from './BottomDock'
 import type { MarkupMode } from './SubToolbars/MarkupSubToolbar'
 import type { MosaicType, MosaicShape } from './SubToolbars/MosaicSubToolbar'
@@ -30,6 +30,8 @@ interface CanvasViewportProps {
   panOffset: { x: number; y: number }
   onZoomChange: (scale: number) => void
   onPanChange: (offset: { x: number; y: number }) => void
+  /** Frames the whole document in the window; owned by the app so every fit path agrees. */
+  onFitViewport: () => void
   /** Live crop drag output; null-safe clamp/commit belongs to the session. */
   onCropChange: (crop: Rect) => void
   /** Ends a crop drag so it becomes one undoable step. */
@@ -62,6 +64,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   panOffset,
   onZoomChange,
   onPanChange,
+  onFitViewport,
   onCropChange,
   onCommitDraft,
   onCancelDraft,
@@ -169,7 +172,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const mouseY = e.clientY - rect.top
 
       const factor = e.deltaY < 0 ? 1.15 : 0.87
-      const newScale = Math.min(32, Math.max(0.05, zoomScale * factor))
+      const newScale = clampZoom(zoomScale * factor)
 
       const { x: newPanX, y: newPanY } = computeCursorAnchoredPan(
         mouseX,
@@ -533,10 +536,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   // Double click toggles Fit / 100%
   const handleDoubleClick = () => {
-    if (Math.abs(zoomScale - 1.0) < 0.1) {
-      onZoomChange(0.5) // Fit
+    if (isNearActualSize(zoomScale)) {
+      onFitViewport()
     } else {
-      onZoomChange(1.0) // 100%
+      onZoomChange(1.0)
     }
   }
 
