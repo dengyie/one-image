@@ -44,6 +44,7 @@ class FakeWorker {
 
 interface SmartEraseRequestLike {
   runId: string
+  provider?: string
   image: ArrayBuffer
 }
 
@@ -93,5 +94,23 @@ describe('smart-erase orchestrator', () => {
     fake.emit({ type: 'done', runId: fake.sent[0].runId, rgba: new Uint8ClampedArray([1, 1, 1, 255]).buffer })
     await expect(p1).resolves.toBeDefined()
     expect(stages).toContain('inference')
+  })
+
+  it('defaults the filler to MI-GAN and forwards an explicit provider', async () => {
+    const fake = new FakeWorker()
+    const p1 = runSmartErase(makeInput(1), () => {}, { workerFactory: () => fake })
+    const p2 = runSmartErase(
+      { ...makeInput(2), provider: 'classical' },
+      () => {},
+      { workerFactory: () => fake }
+    )
+
+    expect(fake.sent[0].provider).toBe('migan')
+    expect(fake.sent[1].provider).toBe('classical')
+
+    // Settle both so the fake worker registry does not leak into other tests.
+    fake.emit({ type: 'done', runId: fake.sent[0].runId, rgba: new Uint8ClampedArray([1, 1, 1, 255]).buffer })
+    fake.emit({ type: 'done', runId: fake.sent[1].runId, rgba: new Uint8ClampedArray([2, 2, 2, 255]).buffer })
+    await Promise.all([p1, p2])
   })
 })

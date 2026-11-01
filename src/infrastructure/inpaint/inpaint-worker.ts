@@ -9,10 +9,13 @@ import { ensureMiganModel } from './model-cache'
 import { ORT_VERSION } from './ort-version'
 import {
   compositeFromChw,
+  compositeRgba,
   maskToBinary,
   rgbaToRgbChw,
   type RgbaPlane,
 } from './inpaint-core'
+import { fillHolesClassical } from './classical-fill'
+import type { FillProvider } from './auto-route'
 
 // Minimal structural contract for the runtime-loaded ORT bundle. Kept local
 // (instead of importing onnxruntime-web types) so the worker's types do not
@@ -39,6 +42,8 @@ export interface SmartEraseRequest {
   runId: string
   width: number
   height: number
+  /** Which filler to run for this hole (chosen by the router on the UI side). */
+  provider: FillProvider
   /** RGBA of the current full-resolution snapshot. */
   image: ArrayBuffer
   /** RGBA mask canvas: white = region to inpaint (crisp, drives the model). */
@@ -140,15 +145,23 @@ async function run(req: SmartEraseRequest): Promise<ArrayBuffer> {
   const report = (response: SmartEraseReport, transfer?: ArrayBuffer): void => {
     scope.postMessage({ ...response, runId: req.runId } satisfies SmartEraseResponse, transfer ? [transfer] : undefined)
   }
+  const imagePlane: RgbaPlane = { data: new Uint8ClampedArray(req.image), width: req.width, height: req.height }
+  const maskPlane: RgbaPlane = { data: new Uint8ClampedArray(req.mask), width: req.width, height: req.height }
+  const alphaPlane: RgbaPlane = { data: new Uint8ClampedArray(req.composite), width: req.width, height: req.height }
+
+  if (req.provider === 'classical') {
+    // Model-free diffusion fill: no session, no download, no resampling.
+    report({ type: 'stage', stage: 'inference' })
+    const filled = fillHolesClassical(imagePlane, maskPlane)
+    const blended = compositeRgba(imagePlane, { data: filled, width: req.width, height: req.height }, alphaPlane)
+    return blended.buffer as ArrayBuffer
+  }
+
   report({ type: 'stage', stage: 'session' })
   let inferenceSession = await getSession(req.runId)
   const ort = await loadOrt()
 
   report({ type: 'stage', stage: 'inference' })
-  const imagePlane: RgbaPlane = { data: new Uint8ClampedArray(req.image), width: req.width, height: req.height }
-  const maskPlane: RgbaPlane = { data: new Uint8ClampedArray(req.mask), width: req.width, height: req.height }
-  const alphaPlane: RgbaPlane = { data: new Uint8ClampedArray(req.composite), width: req.width, height: req.height }
-
   const imageTensor = new ort.Tensor('uint8', rgbaToRgbChw(imagePlane), [1, 3, req.height, req.width])
   const maskTensor = new ort.Tensor('uint8', maskToBinary(maskPlane), [1, 1, req.height, req.width])
   const feeds: Record<string, InstanceType<OrtNamespace['Tensor']>> = {

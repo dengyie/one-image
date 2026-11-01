@@ -2,6 +2,8 @@ import React, { useState } from 'react'
 import { UiIcon } from '../../ui/UiIcon'
 import type { ProvenanceResult } from '../../../infrastructure/openai-provenance-adapter'
 import type { SmartEraseStage } from '../../../infrastructure/inpaint/smart-erase'
+import type { SmartEraseMode } from '../../../infrastructure/inpaint/auto-route'
+import type { MosaicShape } from './MosaicSubToolbar'
 
 export type WatermarkTab = 'add' | 'erase' | 'test'
 export type WatermarkLayout = 'tile' | 'corner'
@@ -20,7 +22,31 @@ export interface WatermarkSubToolbarProps {
   isSmartErasing?: boolean
   smartEraseStage?: SmartEraseStage | null
   smartEraseError?: string | null
+  /** Smart-erase mask shape: painted stroke vs toolbar-created box. */
+  eraseMaskShape: MosaicShape
+  eraseBrushSize: number
+  /** Which filler to use for the smart eraser. */
+  eraseMode: SmartEraseMode
+  onEraseMaskShapeSelect: (shape: MosaicShape) => void
+  onEraseBrushSizeSelect: (size: number) => void
+  onEraseModeSelect: (mode: SmartEraseMode) => void
+  /** Drops every pending smart-erase region. */
+  onClearEraseRegions?: () => void
+  /** Notifies the app which tab is visible, so canvas painting can be gated. */
+  onTabChange?: (tab: WatermarkTab) => void
 }
+
+const ERASE_BRUSH_SIZES = [
+  { label: '细', value: 16 },
+  { label: '中', value: 32 },
+  { label: '粗', value: 64 },
+]
+
+const ERASE_MODES: Array<{ value: SmartEraseMode; label: string; hint: string }> = [
+  { value: 'auto', label: '自动', hint: '按选区大小自动选择：小选区本地扩散，大选区 MI-GAN 合成' },
+  { value: 'classical', label: '快速', hint: '纯本地扩散填充：不下载模型、不重采样，掩膜外逐位不变' },
+  { value: 'migan', label: '标准', hint: 'MI-GAN 合成填充：大选区结构更自然（首次需下载 27MB 模型）' },
+]
 
 const WATERMARK_COLORS = [
   { label: '半透白', value: 'rgba(255, 255, 255, 0.85)' },
@@ -41,8 +67,20 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
   isSmartErasing = false,
   smartEraseStage,
   smartEraseError,
+  eraseMaskShape,
+  eraseBrushSize,
+  eraseMode,
+  onEraseMaskShapeSelect,
+  onEraseBrushSizeSelect,
+  onEraseModeSelect,
+  onClearEraseRegions,
+  onTabChange,
 }) => {
   const [tab, setTab] = useState<WatermarkTab>('add')
+  const selectTab = (next: WatermarkTab) => {
+    setTab(next)
+    onTabChange?.(next)
+  }
 
   // Add watermark state
   const [text, setText] = useState('OneImage')
@@ -60,7 +98,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
         <div className="flex items-center gap-1">
           <button
             type="button"
-            onClick={() => setTab('add')}
+            onClick={() => selectTab('add')}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-medium transition-all ${
               tab === 'add'
                 ? 'bg-emerald-500 text-zinc-950 shadow-md shadow-emerald-500/20'
@@ -72,7 +110,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => setTab('erase')}
+            onClick={() => selectTab('erase')}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-medium transition-all ${
               tab === 'erase'
                 ? 'bg-emerald-500 text-zinc-950 shadow-md shadow-emerald-500/20'
@@ -84,7 +122,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => setTab('test')}
+            onClick={() => selectTab('test')}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-medium transition-all ${
               tab === 'test'
                 ? 'bg-emerald-500 text-zinc-950 shadow-md shadow-emerald-500/20'
@@ -235,24 +273,117 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
             </div>
           </div>
 
-          <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-zinc-800">
-            点击下方按钮在画面中央生成消除选区，随后可在视口中自由拖拽框选水印位置以完成覆盖消除。
-          </p>
+          {eraseType !== 'ai' && (
+            <>
+              <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-zinc-800">
+                点击下方按钮在画面中央生成消除选区，随后可在视口中自由拖拽框选水印位置以完成覆盖消除。
+              </p>
 
-          <button
-            type="button"
-            onClick={() => onAddEraseRegion(eraseType)}
-            className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
-          >
-            <UiIcon name="crop" size={13} strokeWidth={2.2} />
-            <span>生成消除水印选区</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => onAddEraseRegion(eraseType)}
+                className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
+              >
+                <UiIcon name="crop" size={13} strokeWidth={2.2} />
+                <span>生成消除水印选区</span>
+              </button>
+            </>
+          )}
 
           {eraseType === 'ai' && (
             <>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-zinc-400 w-14 shrink-0">选区方式</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onEraseMaskShapeSelect('brush')}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] transition-all ${
+                      eraseMaskShape === 'brush'
+                        ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <UiIcon name="brush" size={12} />
+                    <span>涂抹水印</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onEraseMaskShapeSelect('rect')}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] transition-all ${
+                      eraseMaskShape === 'rect'
+                        ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <UiIcon name="square" size={12} />
+                    <span>框选水印</span>
+                  </button>
+                </div>
+              </div>
+
+              {eraseMaskShape === 'brush' ? (
+                <>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-emerald-900/40">
+                    在画面上沿水印文字涂抹，只把笔迹覆盖的像素作为修复掩膜——笔迹外的背景完全不参与合成，这是「图像不变」的关键。
+                  </p>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-zinc-400 w-14 shrink-0">笔刷粗细</span>
+                    <div className="flex items-center gap-1">
+                      {ERASE_BRUSH_SIZES.map((size) => (
+                        <button
+                          key={size.value}
+                          type="button"
+                          onClick={() => onEraseBrushSizeSelect(size.value)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
+                            eraseBrushSize === size.value
+                              ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
+                              : 'text-zinc-400 hover:text-zinc-200'
+                          }`}
+                        >
+                          {size.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onAddEraseRegion('ai')}
+                  className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
+                >
+                  <UiIcon name="crop" size={13} strokeWidth={2.2} />
+                  <span>生成智能修复选框</span>
+                </button>
+              )}
+
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-zinc-400 w-14 shrink-0">填充引擎</span>
+                <div className="flex items-center gap-1">
+                  {ERASE_MODES.map((mode) => (
+                    <button
+                      key={mode.value}
+                      type="button"
+                      title={mode.hint}
+                      onClick={() => onEraseModeSelect(mode.value)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
+                        eraseMode === mode.value
+                          ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {mode.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-emerald-900/40">
-                智能修复在浏览器本地用 MI-GAN 从周围画面合成水印区域：掩膜外像素逐位保留，原图不上传。首次使用需下载 27MB 模型。
+                {ERASE_MODES.find((mode) => mode.value === eraseMode)?.hint}
+                ；掩膜外像素逐位保留，原图不上传。
               </p>
+
               <button
                 type="button"
                 disabled={isSmartErasing || !hasEraseAiRegions}
@@ -275,10 +406,23 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
                 ) : (
                   <>
                     <UiIcon name="sparkles" size={13} />
-                    <span>{hasEraseAiRegions ? '运行智能修复（虚线区域）' : '请先生成智能修复选区'}</span>
+                    <span>{hasEraseAiRegions ? '运行智能修复（虚线区域）' : '请先涂抹或框选水印'}</span>
                   </>
                 )}
               </button>
+
+              {hasEraseAiRegions && onClearEraseRegions && (
+                <button
+                  type="button"
+                  disabled={isSmartErasing}
+                  onClick={onClearEraseRegions}
+                  className="flex items-center justify-center gap-1.5 w-full py-1 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] transition-all border border-zinc-700/60 disabled:opacity-50"
+                >
+                  <UiIcon name="trash" size={12} />
+                  <span>清除全部修复选区</span>
+                </button>
+              )}
+
               {smartEraseError && (
                 <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-900/60 p-2 rounded-lg font-mono">
                   {smartEraseError}

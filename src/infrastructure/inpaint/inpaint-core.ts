@@ -80,3 +80,39 @@ export function compositeFromChw(chw: Uint8Array, base: RgbaPlane, alpha: RgbaPl
 function clampByte(value: number): number {
   return value < 0 ? 0 : value > 255 ? 255 : value
 }
+
+/**
+ * Same blending contract as compositeFromChw, but for a filler that already
+ * speaks RGBA (the classical diffusion filler). Pixels where alpha is 0 are
+ * copied bit-for-bit from the base, so "nothing outside the mask changes"
+ * holds for both providers.
+ */
+export function compositeRgba(base: RgbaPlane, generated: RgbaPlane, alpha: RgbaPlane): Uint8ClampedArray {
+  const size = base.width * base.height
+  const out = new Uint8ClampedArray(size * 4)
+  for (let i = 0; i < size; i++) {
+    const o = i * 4
+    const a = alpha.data[o] / 255
+    if (a === 0) {
+      out[o] = base.data[o]
+      out[o + 1] = base.data[o + 1]
+      out[o + 2] = base.data[o + 2]
+      out[o + 3] = base.data[o + 3]
+      continue
+    }
+    const r = generated.data[o]
+    const g = generated.data[o + 1]
+    const b = generated.data[o + 2]
+    if (a === 1) {
+      out[o] = r
+      out[o + 1] = g
+      out[o + 2] = b
+    } else {
+      out[o] = Math.round(base.data[o] * (1 - a) + r * a)
+      out[o + 1] = Math.round(base.data[o + 1] * (1 - a) + g * a)
+      out[o + 2] = Math.round(base.data[o + 2] * (1 - a) + b * a)
+    }
+    out[o + 3] = base.data[o + 3]
+  }
+  return out
+}
