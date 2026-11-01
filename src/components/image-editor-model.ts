@@ -77,13 +77,28 @@ export interface PanOffset {
 }
 
 export const VIEWPORT_FIT_MARGIN = 120
-export const MIN_ZOOM_SCALE = 0.1
+/** Zoom domain shared by the wheel, the zoom buttons and the fit calculation. */
+export const MIN_ZOOM_SCALE = 0.05
+export const MAX_ZOOM_SCALE = 32
+/** Fitting never upscales a document past its natural size. */
+export const MAX_FIT_SCALE = 1
+/** A toggle-zoom affordance treats anything this close to 1:1 as actual size. */
+export const ZOOM_TOGGLE_TOLERANCE = 0.1
+
+export function clampZoom(scale: number): number {
+  if (!Number.isFinite(scale)) return MAX_FIT_SCALE
+  return Math.min(MAX_ZOOM_SCALE, Math.max(MIN_ZOOM_SCALE, scale))
+}
+
+export function isNearActualSize(scale: number): boolean {
+  return Math.abs(scale - 1) < ZOOM_TOGGLE_TOLERANCE
+}
 
 /**
  * The framing a document opens in: fit inside the window minus a margin, never
- * upscaled past 100%. Reverting a document computes the same numbers, so the
- * picture lands where the user first saw it instead of keeping whatever zoom
- * and pan they had scrolled to.
+ * upscaled past 100%. Every path that frames a document — opening it, reverting
+ * it, the zoom button and double-click — goes through here, so they cannot
+ * disagree about what "fit" means.
  */
 export function computeFitScale(
   document: { width: number; height: number },
@@ -91,14 +106,14 @@ export function computeFitScale(
   margin = VIEWPORT_FIT_MARGIN
 ): number {
   const scale = Math.min(
-    1.0,
+    MAX_FIT_SCALE,
     (viewport.width - margin) / document.width,
     (viewport.height - margin) / document.height
   )
   // A zero-sized document or window would otherwise poison the transform with
   // Infinity/NaN, which leaves the canvas unmountable.
-  if (!Number.isFinite(scale)) return 1.0
-  return Math.max(MIN_ZOOM_SCALE, Number(scale.toFixed(2)))
+  if (!Number.isFinite(scale)) return MAX_FIT_SCALE
+  return clampZoom(Number(scale.toFixed(2)))
 }
 
 // Cursor-anchored wheel zoom for the spatial viewport transform

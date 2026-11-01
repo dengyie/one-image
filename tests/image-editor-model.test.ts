@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { computeCursorAnchoredPan, computeFitScale, createCropGesture, mapSourceRectToViewport, mapPointerToSource, updateCropGesture } from '../src/components/image-editor-model'
+import { clampZoom, computeCursorAnchoredPan, computeFitScale, createCropGesture, isNearActualSize, mapSourceRectToViewport, mapPointerToSource, updateCropGesture, MAX_FIT_SCALE, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE } from '../src/components/image-editor-model'
 
 describe('image editor interaction model', () => {
   it('converts a pointer drag into a bounded crop move', () => {
@@ -122,11 +122,43 @@ describe('fit framing used when a document opens or is reverted', () => {
     expect(computeFitScale({ width: 120, height: 80 }, { width: 1600, height: 1000 })).toBe(1)
   })
 
-  it('clamps to the minimum zoom when the margin swallows the window', () => {
-    expect(computeFitScale({ width: 4000, height: 4000 }, { width: 640, height: 480 })).toBe(0.1)
+  it('still frames a window narrower than the margin instead of snapping to the floor', () => {
+    // 520x360 usable: height wins -> 0.09, inside the 0.05..32 zoom domain.
+    expect(computeFitScale({ width: 4000, height: 4000 }, { width: 640, height: 480 })).toBe(0.09)
+  })
+
+  it('lands exactly on the minimum zoom for documents too large to fit at all', () => {
+    // 0.0036 rounds to 0 and must clamp to the wheel/button floor, not stay at 0.
+    expect(computeFitScale({ width: 100000, height: 100000 }, { width: 640, height: 480 })).toBe(0.05)
   })
 
   it('falls back to 1 for a degenerate document size instead of returning NaN', () => {
     expect(computeFitScale({ width: 0, height: 0 }, { width: 1200, height: 800 })).toBe(1)
+  })
+
+  it('keeps fit inside the same zoom domain the wheel and buttons enforce', () => {
+    const fit = computeFitScale({ width: 100000, height: 100000 }, { width: 640, height: 480 })
+    expect(fit).toBeGreaterThanOrEqual(MIN_ZOOM_SCALE)
+    expect(fit).toBeLessThanOrEqual(MAX_ZOOM_SCALE)
+  })
+})
+
+describe('shared zoom domain', () => {
+  it('clamps both ends and passes normal values through', () => {
+    expect(clampZoom(0.001)).toBe(MIN_ZOOM_SCALE)
+    expect(clampZoom(100)).toBe(MAX_ZOOM_SCALE)
+    expect(clampZoom(1.5)).toBe(1.5)
+  })
+
+  it('recovers from non-finite input instead of poisoning the transform', () => {
+    expect(clampZoom(Number.NaN)).toBe(MAX_FIT_SCALE)
+    expect(clampZoom(Number.POSITIVE_INFINITY)).toBe(MAX_FIT_SCALE)
+  })
+
+  it('treats a view within tolerance of 1:1 as actual size', () => {
+    expect(isNearActualSize(1)).toBe(true)
+    expect(isNearActualSize(0.95)).toBe(true)
+    expect(isNearActualSize(0.8)).toBe(false)
+    expect(isNearActualSize(1.2)).toBe(false)
   })
 })
