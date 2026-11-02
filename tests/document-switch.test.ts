@@ -7,9 +7,11 @@ import type { DecodedSource } from '../src/application/editor-renderer'
 import { createEditorState } from '../src/domain/editor-state'
 import {
   EMPTY_SESSION,
+  canUndoSession,
   commitVisibleState,
   openDocument,
   sessionState,
+  standaloneSession,
   undoSession,
   type EditorSession,
   type EditorSnapshot,
@@ -272,5 +274,60 @@ describe('document switcher', () => {
 
     expect(harness.installed.map((entry) => entry.snapshot.docId)).toEqual(['doc-b'])
     expect(decodedA.close).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('standalone (multi-image) sessions', () => {
+  it('openStandaloneDocument starts a fresh tree instead of chaining the previous document', async () => {
+    const decoded = fakeDecoded()
+    const harness = createHarness(async () => decoded.source)
+    const first = standaloneSession(snapshot('doc-a'))
+    harness.setSession(first)
+
+    await harness.switcher.openStandaloneDocument(makeFile('doc-b.png'), () => snapshot('doc-b'))
+
+    const committed = harness.session()
+    expect(committed.history!.present.docId).toBe('doc-b')
+    expect(committed.history!.past).toEqual([])
+    // The first image stays alive in its own session, untouched.
+    expect(first.history!.present.docId).toBe('doc-a')
+    expect(canUndoSession(first)).toBe(false)
+  })
+
+  it('keeps two images decoupled: switching never merges trees and undo stays per image', () => {
+    const sessionA = standaloneSession(snapshot('img-a'))
+    const sessionB = standaloneSession(snapshot('img-b'))
+
+    // Edit A twice, B once.
+    const a1 = commitVisibleState(sessionA, { ...sessionA.history!.present.state, rotation: 90 })
+    const a2 = commitVisibleState(a1, { ...a1.history!.present.state, rotation: 180 })
+    const b1 = commitVisibleState(sessionB, { ...sessionB.history!.present.state, rotation: 45 })
+
+    expect(canUndoSession(a2)).toBe(true)
+    expect(canUndoSession(b1)).toBe(true)
+    expect(b1.history!.past.some((entry) => entry.docId === 'img-a')).toBe(false)
+    expect(a2.history!.past.every((entry) => entry.docId === 'img-a')).toBe(true)
+
+    // Undo on B never lands on A.
+    const b0 = undoSession(b1)
+    expect(b0.history!.present.docId).toBe('img-b')
+    expect(canUndoSession(b0)).toBe(false)
+
+    // Undo on A walks only A's own two steps.
+    const a1undone = undoSession(a2)
+    expect(a1undone.history!.present.docId).toBe('img-a')
+    const a0 = undoSession(a1undone)
+    expect(a0.history!.present.docId).toBe('img-a')
+    expect(canUndoSession(a0)).toBe(false)
+  })
+
+  it('openStandaloneDocument routes failures through the same error path', async () => {
+    const harness = createHarness(async () => {
+      throw new Error('bad image')
+    })
+    const ok = await harness.switcher.openStandaloneDocument(makeFile('x.png'), () => snapshot('x'))
+    expect(ok).toBe(false)
+    expect(harness.errors).toHaveLength(1)
+    expect(harness.errors[0].failure).toBe('load')
   })
 })

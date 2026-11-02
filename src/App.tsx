@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { validateImageFile } from './application/file-policy'
 import { exportEditor, type DecodedSource } from './application/editor-renderer'
 import { createBrowserCanvasFactory, decodeEditorSource } from './infrastructure/editor-canvas'
+import type { OpenImageItem } from './components/editor/ImageListPanel'
+import { ImageListPanel } from './components/editor/ImageListPanel'
 import {
   type EditorState,
   type Adjustments,
@@ -188,6 +190,18 @@ export function App() {
   // standalone canvas snapshot: the document switcher closes replaced decoded
   // bitmaps, so a raw reference would go dead on the first erase.
   const rootOriginalRef = useRef<DecodedSource | null>(null)
+
+  // Multi-image working set. Every user-loaded image owns a STANDALONE session
+  // (fresh history tree), so undo/redo/还原 stay inside the image being edited
+  // and never walk into another one; the left list switches between them.
+  const imageSessionsRef = useRef<Map<string, EditorSession>>(new Map())
+  const activeRootIdRef = useRef<string | null>(null)
+  const [activeRootId, setActiveRootId] = useState<string | null>(null)
+  const [openImages, setOpenImages] = useState<OpenImageItem[]>([])
+  const switchActiveRoot = useCallback((id: string | null) => {
+    activeRootIdRef.current = id
+    setActiveRootId(id)
+  }, [])
   const setRootOriginal = useCallback(
     (decoded: DecodedSource) => {
       const snapshot = factory.create(decoded.width, decoded.height)
@@ -462,6 +476,7 @@ export function App() {
         commit: (next) => {
           sessionRef.current = next
           setSession(next)
+          if (activeRootIdRef.current) imageSessionsRef.current.set(activeRootIdRef.current, next)
         },
         flushPending: () => flushPendingPersist(),
         setBusy: (busy) => setIsProcessing(busy),
@@ -490,19 +505,27 @@ export function App() {
       }
 
       setErrorMessage(null)
-      const opened = await documentSwitcher.openDocument(nextFile, (decoded) => {
+      const rootId = createDraftId()
+      switchActiveRoot(rootId)
+      let dims = { width: 0, height: 0 }
+      const opened = await documentSwitcher.openStandaloneDocument(nextFile, (decoded) => {
         setRootOriginal(decoded)
+        dims = { width: decoded.width, height: decoded.height }
         return {
-          docId: createDraftId(),
+          docId: rootId,
           file: nextFile,
           state: createEditorState(decoded.width, decoded.height),
         }
       })
       if (opened) {
+        setOpenImages((prev) => [
+          ...prev,
+          { rootId, name: nextFile.name, size: nextFile.size, url: URL.createObjectURL(nextFile), ...dims },
+        ])
         showToast(`已载入 ${nextFile.name}，完全在本地处理`, 'success')
       }
     },
-    [documentSwitcher, showToast, setRootOriginal]
+    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot]
   )
 
   // Crop drag output: visible immediately, not yet an undoable step.
@@ -803,6 +826,46 @@ export function App() {
     }))
   }, [commitEdit])
 
+  // Working-set list handlers. Switching installs that image's own session
+  // (decode handled by the switcher); closing drops the session and, when the
+  // active image is closed, lands on the most recently opened remaining one.
+  const handleSelectImage = useCallback(
+    (rootId: string) => {
+      if (rootId === activeRootIdRef.current) return
+      const target = imageSessionsRef.current.get(rootId)
+      if (!target) return
+      switchActiveRoot(rootId)
+      void documentSwitcher.applySession(target)
+    },
+    [documentSwitcher, switchActiveRoot]
+  )
+
+  const handleCloseImage = useCallback(
+    (rootId: string) => {
+      const entry = openImages.find((img) => img.rootId === rootId)
+      if (!entry) return
+      flushPendingPersist()
+      URL.revokeObjectURL(entry.url)
+      imageSessionsRef.current.delete(rootId)
+      const remaining = openImages.filter((img) => img.rootId !== rootId)
+      setOpenImages(remaining)
+      if (rootId !== activeRootIdRef.current) return
+      const next = remaining[remaining.length - 1] ?? null
+      switchActiveRoot(next?.rootId ?? null)
+      if (next) {
+        void documentSwitcher.applySession(imageSessionsRef.current.get(next.rootId)!)
+      } else {
+        // Last image closed: back to the landing screen.
+        rootOriginalRef.current = null
+        sessionRef.current = EMPTY_SESSION
+        setSession(EMPTY_SESSION)
+        setFile(null)
+        setDecodedSource(null)
+      }
+    },
+    [openImages, documentSwitcher, switchActiveRoot, flushPendingPersist]
+  )
+
   // Watermark erase: bake the current state at full resolution, run the filler
   // chosen by the erase mode in the browser-local worker under the pending mask
   // regions, and open the result as a new document. Pixels outside the mask are
@@ -1080,19 +1143,27 @@ export function App() {
   const restoreLocalDraft = useCallback(
     async (local: LocalHistoryItem) => {
       const restoredFile = new File([local.originalBlob], local.fileName, { type: local.mimeType })
-      const restored = await documentSwitcher.openDocument(
+      switchActiveRoot(local.id)
+      let dims = { width: 0, height: 0 }
+      const restored = await documentSwitcher.openStandaloneDocument(
         restoredFile,
         (decoded) => {
           setRootOriginal(decoded)
+          dims = { width: decoded.width, height: decoded.height }
           return { docId: local.id, file: restoredFile, state: local.editorState }
         },
         'restore'
       )
       if (!restored) return
+      setOpenImages((prev) =>
+        prev.some((img) => img.rootId === local.id)
+          ? prev
+          : [...prev, { rootId: local.id, name: local.fileName, size: local.fileSize, url: URL.createObjectURL(restoredFile), ...dims }]
+      )
       setShowHistoryDrawer(false)
       showToast(`已恢复草稿：${local.title}`, 'success')
     },
-    [documentSwitcher, showToast, setRootOriginal]
+    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot]
   )
 
   // Restore project from history item
@@ -1413,6 +1484,13 @@ export function App() {
             onQuickExport={handleQuickExport}
             onExportFormat={handleExportFormat}
             onCopyToClipboard={handleCopyToClipboard}
+          />
+
+          <ImageListPanel
+            images={openImages}
+            activeRootId={activeRootId}
+            onSelect={handleSelectImage}
+            onClose={handleCloseImage}
           />
 
           {/* Master Spatial Canvas Viewport */}
