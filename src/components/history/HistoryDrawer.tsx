@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react'
+import { formatBytes } from '../../domain/format'
 import { UiIcon } from '../ui/UiIcon'
 import type { LocalHistoryItem } from '../../infrastructure/history-storage'
 import type { CloudProject, SafeUser } from '../../infrastructure/auth-client'
@@ -30,14 +31,6 @@ interface HistoryDrawerProps {
   onDeleteItem: (item: UnifiedHistoryItem) => void
   onClearAllLocal: () => void
   onOpenAuth: () => void
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes <= 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`
 }
 
 function formatTimeAgo(timestamp: number): string {

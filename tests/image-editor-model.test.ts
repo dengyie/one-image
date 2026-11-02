@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampZoom, computeCursorAnchoredPan, computeFitScale, createCropGesture, isNearActualSize, isViewportOffFit, mapSourceRectToViewport, mapPointerToSource, pickCompareSource, updateCropGesture, MAX_FIT_SCALE, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE } from '../src/components/image-editor-model'
+import { clampZoom, computeCursorAnchoredPan, computeFitScale, createCropGesture, isNearActualSize, isViewportOffFit, mapSourceRectToViewport, mapPointerToSource, pickCompareSource, resolveCompareSource, updateCropGesture, MAX_FIT_SCALE, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE } from '../src/components/image-editor-model'
 
 describe('image editor interaction model', () => {
   it('converts a pointer drag into a bounded crop move', () => {
@@ -193,5 +193,38 @@ describe('pickCompareSource', () => {
   it('keeps the current document when no root was tracked', () => {
     const current = { id: 'current' }
     expect(pickCompareSource(current, null)).toBeNull()
+  })
+})
+
+describe('resolveCompareSource (per-root lookup)', () => {
+  const roots = new Map<string, object>([
+    ['root-a', { id: 'snap-a' }],
+    ['root-b', { id: 'snap-b' }],
+  ])
+
+  it('uses the active root snapshot when it differs from the current document', () => {
+    const current = { id: 'erased-a' }
+    expect(resolveCompareSource(current, roots, 'root-a')).toBe(roots.get('root-a'))
+  })
+
+  it('resolves to null when the active image is its own root', () => {
+    const current = roots.get('root-a')
+    expect(resolveCompareSource(current, roots, 'root-a')).toBeNull()
+  })
+
+  it('resolves to null without a tracked root or an active image', () => {
+    expect(resolveCompareSource({ id: 'x' }, null, 'root-a')).toBeNull()
+    expect(resolveCompareSource({ id: 'x' }, roots, null)).toBeNull()
+    // 未知的 rootId 视同无根
+    expect(resolveCompareSource({ id: 'x' }, roots, 'root-unknown')).toBeNull()
+  })
+
+  it('never returns ANOTHER image root snapshot (the singleton-slot regression)', () => {
+    // 单例槽位时代的缺陷：A 活动时对比拿到 B 的快照。per-root 查找按 activeRootId
+    // 取值，结构上不可能再返回别的图的根快照。
+    const current = { id: 'erased-a' }
+    const result = resolveCompareSource(current, roots, 'root-a')
+    expect(result).toBe(roots.get('root-a'))
+    expect(result).not.toBe(roots.get('root-b'))
   })
 })

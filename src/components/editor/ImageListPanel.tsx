@@ -1,4 +1,5 @@
 import React from 'react'
+import { formatBytes } from '../../domain/format'
 
 /**
  * One entry of the multi-image working set: a user-loaded image with its own
@@ -17,14 +18,10 @@ export interface OpenImageItem {
 interface ImageListPanelProps {
   images: OpenImageItem[]
   activeRootId: string | null
+  /** While an erase run owns the active session, switching/closing is blocked. */
+  disabled?: boolean
   onSelect: (rootId: string) => void
   onClose: (rootId: string) => void
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`
-  return `${bytes}B`
 }
 
 /**
@@ -32,13 +29,13 @@ function formatBytes(bytes: number): string {
  * glass-panel language as the tool sub-toolbars (zinc-900/95 + backdrop blur +
  * white/10 border); the active image carries the emerald ring.
  */
-export const ImageListPanel: React.FC<ImageListPanelProps> = ({ images, activeRootId, onSelect, onClose }) => {
+export const ImageListPanel: React.FC<ImageListPanelProps> = ({ images, activeRootId, disabled = false, onSelect, onClose }) => {
   if (images.length < 2) return null
 
   return (
     <aside
       data-testid="image-list-panel"
-      className="absolute left-3 top-20 bottom-28 z-30 w-[104px] flex flex-col rounded-2xl bg-zinc-900/95 backdrop-blur-2xl border border-white/10 shadow-2xl overflow-hidden"
+      className={`absolute left-3 top-20 bottom-28 z-30 w-[104px] flex flex-col rounded-2xl bg-zinc-900/95 backdrop-blur-2xl border border-white/10 shadow-2xl overflow-hidden ${disabled ? 'opacity-60' : ''}`}
     >
       <div className="px-2.5 pt-2 pb-1.5 text-[10px] font-medium text-zinc-500 border-b border-zinc-800/80 shrink-0">
         图片 · {images.length}
@@ -50,6 +47,7 @@ export const ImageListPanel: React.FC<ImageListPanelProps> = ({ images, activeRo
             <div key={img.rootId} className="relative group shrink-0">
               <button
                 type="button"
+                disabled={disabled}
                 onClick={() => onSelect(img.rootId)}
                 title={`${img.name} · ${img.width}×${img.height} · ${formatBytes(img.size)}`}
                 className={`w-full text-left rounded-xl p-1 transition-all border ${
@@ -73,6 +71,7 @@ export const ImageListPanel: React.FC<ImageListPanelProps> = ({ images, activeRo
               {images.length > 1 && (
                 <button
                   type="button"
+                  disabled={disabled}
                   title="从工作区移除"
                   onClick={(e) => {
                     e.stopPropagation()
