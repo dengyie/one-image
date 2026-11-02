@@ -70,7 +70,7 @@ import { drawEraseAiMask } from './application/editor-renderer'
 import { refineMaskToStrokes, detectStrokeRegions } from './infrastructure/inpaint/mask-refine'
 import { countHolePixels } from './infrastructure/inpaint/classical-fill'
 import { routeFill, resolveEraseProvider, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
-import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, MAX_FIT_SCALE } from './components/image-editor-model'
+import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, pickCompareSource, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
 /** Stable per-document id; also the IndexedDB draft id for local drafts. */
@@ -181,6 +181,11 @@ export function App() {
   const [zoomScale, setZoomScale] = useState(1.0)
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
   const [isComparingOriginal, setIsComparingOriginal] = useState(false)
+  // The image the user actually brought in (load/paste/换图 or a history
+  // restore). Erase results open as derived documents, so 原图对比 must keep
+  // comparing against this root — against the latest derived bitmap the
+  // feature would show two identical frames and look broken.
+  const rootOriginalRef = useRef<DecodedSource | null>(null)
 
   // Toast feedback
   const [toast, setToast] = useState<{ text: string; type: 'info' | 'success' | 'error' } | null>(null)
@@ -469,11 +474,14 @@ export function App() {
       }
 
       setErrorMessage(null)
-      const opened = await documentSwitcher.openDocument(nextFile, (decoded) => ({
-        docId: createDraftId(),
-        file: nextFile,
-        state: createEditorState(decoded.width, decoded.height),
-      }))
+      const opened = await documentSwitcher.openDocument(nextFile, (decoded) => {
+        rootOriginalRef.current = decoded
+        return {
+          docId: createDraftId(),
+          file: nextFile,
+          state: createEditorState(decoded.width, decoded.height),
+        }
+      })
       if (opened) {
         showToast(`已载入 ${nextFile.name}，完全在本地处理`, 'success')
       }
@@ -1058,7 +1066,10 @@ export function App() {
       const restoredFile = new File([local.originalBlob], local.fileName, { type: local.mimeType })
       const restored = await documentSwitcher.openDocument(
         restoredFile,
-        () => ({ docId: local.id, file: restoredFile, state: local.editorState }),
+        (decoded) => {
+          rootOriginalRef.current = decoded
+          return { docId: local.id, file: restoredFile, state: local.editorState }
+        },
         'restore'
       )
       if (!restored) return
@@ -1392,6 +1403,7 @@ export function App() {
           <main className="w-full h-full">
             <CanvasViewport
               source={decodedSource}
+              compareSource={pickCompareSource(decodedSource, rootOriginalRef.current)}
               state={currentState}
               activeTool={activeTool}
               markupMode={markupMode}

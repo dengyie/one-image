@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampZoom, computeCursorAnchoredPan, computeFitScale, createCropGesture, isNearActualSize, isViewportOffFit, mapSourceRectToViewport, mapPointerToSource, updateCropGesture, MAX_FIT_SCALE, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE } from '../src/components/image-editor-model'
+import { clampZoom, computeCursorAnchoredPan, computeFitScale, createCropGesture, isNearActualSize, isViewportOffFit, mapSourceRectToViewport, mapPointerToSource, pickCompareSource, updateCropGesture, MAX_FIT_SCALE, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE } from '../src/components/image-editor-model'
 
 describe('image editor interaction model', () => {
   it('converts a pointer drag into a bounded crop move', () => {
@@ -175,5 +175,23 @@ describe('isViewportOffFit', () => {
   it('flags a zoom that drifted from fit with zero pan', () => {
     expect(isViewportOffFit({ x: 0, y: 0 }, 1, fit)).toBe(true)
     expect(isViewportOffFit({ x: 0, y: 0 }, fit + 0.01, fit)).toBe(true)
+  })
+})
+
+describe('pickCompareSource', () => {
+  it('falls back to the root image when the current document is derived from it', () => {
+    const root = { id: 'root' }
+    const derived = { id: 'erased' }
+    expect(pickCompareSource(derived, root)).toBe(root)
+  })
+
+  it('keeps the current document when it already is the root', () => {
+    const root = { id: 'root' }
+    expect(pickCompareSource(root, root)).toBeNull()
+  })
+
+  it('keeps the current document when no root was tracked', () => {
+    const current = { id: 'current' }
+    expect(pickCompareSource(current, null)).toBeNull()
   })
 })
