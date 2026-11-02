@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { validateImageFile } from './application/file-policy'
-import { exportEditor, type DecodedSource } from './application/editor-renderer'
+import { exportEditor, PREVIEW_MAX_EDGE, resolveRenderDimensions, type DecodedSource } from './application/editor-renderer'
 import { createBrowserCanvasFactory, decodeEditorSource } from './infrastructure/editor-canvas'
 import type { OpenImageItem } from './components/editor/ImageListPanel'
 import { MAX_OPEN_IMAGES, findRootIdForSession } from './domain/working-set'
@@ -74,7 +74,7 @@ import { drawEraseAiMask } from './application/editor-renderer'
 import { refineMaskToStrokes, detectStrokeRegions } from './infrastructure/inpaint/mask-refine'
 import { countHolePixels } from './infrastructure/inpaint/classical-fill'
 import { routeFill, resolveEraseProvider, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
-import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, pickCompareSource, resolveCompareSource, MAX_FIT_SCALE } from './components/image-editor-model'
+import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, resolveCompareSource, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
 /** Stable per-document id; also the IndexedDB draft id for local drafts. */
@@ -206,13 +206,18 @@ export function App() {
   }, [])
   const setRootOriginal = useCallback(
     (rootId: string, decoded: DecodedSource) => {
-      const snapshot = factory.create(decoded.width, decoded.height)
+      // 对比预览的渲染上限就是 PREVIEW_MAX_EDGE，快照存到同一上限即可满足
+      // 对比渲染——同时把每张图的常驻内存从最高 ~100MB（25MP×4B）压到 ~23MB。
+      // 合成的 DecodedSource 仍报告原始尺寸（planRender 按原图算画布），
+      // draw 时再把快照缩放到位。
+      const { width, height } = resolveRenderDimensions(decoded.width, decoded.height, PREVIEW_MAX_EDGE)
+      const snapshot = factory.create(width, height)
       const ctx = snapshot.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
-      decoded.draw(ctx, decoded.width, decoded.height)
+      decoded.draw(ctx, width, height)
       rootOriginalMap.current.set(rootId, {
         width: decoded.width,
         height: decoded.height,
-        draw: (target, width, height) => target.drawImage(snapshot as unknown as CanvasImageSource, 0, 0, width, height),
+        draw: (target, drawWidth, drawHeight) => target.drawImage(snapshot as unknown as CanvasImageSource, 0, 0, drawWidth, drawHeight),
         close: () => {},
       })
     },
