@@ -503,6 +503,12 @@ export function App() {
   // list — switching between images happens there, never through undo.
   const loadFile = useCallback(
     async (nextFile: File) => {
+      // Same gate as list switching: a paste mid-erase would become the active
+      // session and the running result would chain into the NEW image's tree.
+      if (isSmartErasing) {
+        showToast('正在执行智能清理，请等待完成后再载入新图片', 'info')
+        return
+      }
       const validation = validateImageFile(nextFile)
       if (!validation.ok) {
         setErrorMessage(validation.message)
@@ -536,7 +542,7 @@ export function App() {
         showToast(`已载入 ${nextFile.name}，完全在本地处理`, 'success')
       }
     },
-    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, openImages]
+    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, openImages, isSmartErasing]
   )
 
   // Crop drag output: visible immediately, not yet an undoable step.
@@ -1173,6 +1179,10 @@ export function App() {
   // the image that was open stays one undo away.
   const restoreLocalDraft = useCallback(
     async (local: LocalHistoryItem) => {
+      if (isSmartErasing) {
+        showToast('正在执行智能清理，请等待完成后再恢复草稿', 'info')
+        return
+      }
       const restoredFile = new File([local.originalBlob], local.fileName, { type: local.mimeType })
       const alreadyListed = openImages.some((img) => img.rootId === local.id)
       if (!alreadyListed && openImages.length >= MAX_OPEN_IMAGES) {
@@ -1199,7 +1209,7 @@ export function App() {
       setShowHistoryDrawer(false)
       showToast(`已恢复草稿：${local.title}`, 'success')
     },
-    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, openImages]
+    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, openImages, isSmartErasing]
   )
 
   // Restore project from history item
