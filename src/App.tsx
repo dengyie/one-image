@@ -3,6 +3,8 @@ import { validateImageFile } from './application/file-policy'
 import { exportEditor, type DecodedSource } from './application/editor-renderer'
 import { createBrowserCanvasFactory, decodeEditorSource } from './infrastructure/editor-canvas'
 import type { OpenImageItem } from './components/editor/ImageListPanel'
+import { MAX_OPEN_IMAGES, findRootIdForSession } from './domain/working-set'
+import { formatBytes } from './domain/format'
 import { ImageListPanel } from './components/editor/ImageListPanel'
 import {
   type EditorState,
@@ -72,7 +74,7 @@ import { drawEraseAiMask } from './application/editor-renderer'
 import { refineMaskToStrokes, detectStrokeRegions } from './infrastructure/inpaint/mask-refine'
 import { countHolePixels } from './infrastructure/inpaint/classical-fill'
 import { routeFill, resolveEraseProvider, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
-import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, pickCompareSource, MAX_FIT_SCALE } from './components/image-editor-model'
+import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, pickCompareSource, resolveCompareSource, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
 /** Stable per-document id; also the IndexedDB draft id for local drafts. */
@@ -189,7 +191,7 @@ export function App() {
   // feature would show two identical frames and look broken. Held as a
   // standalone canvas snapshot: the document switcher closes replaced decoded
   // bitmaps, so a raw reference would go dead on the first erase.
-  const rootOriginalRef = useRef<DecodedSource | null>(null)
+  const rootOriginalMap = useRef<Map<string, DecodedSource>>(new Map())
 
   // Multi-image working set. Every user-loaded image owns a STANDALONE session
   // (fresh history tree), so undo/redo/还原 stay inside the image being edited
@@ -203,16 +205,16 @@ export function App() {
     setActiveRootId(id)
   }, [])
   const setRootOriginal = useCallback(
-    (decoded: DecodedSource) => {
+    (rootId: string, decoded: DecodedSource) => {
       const snapshot = factory.create(decoded.width, decoded.height)
       const ctx = snapshot.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
       decoded.draw(ctx, decoded.width, decoded.height)
-      rootOriginalRef.current = {
+      rootOriginalMap.current.set(rootId, {
         width: decoded.width,
         height: decoded.height,
         draw: (target, width, height) => target.drawImage(snapshot as unknown as CanvasImageSource, 0, 0, width, height),
         close: () => {},
-      }
+      })
     },
     [factory]
   )
@@ -298,16 +300,20 @@ export function App() {
 
   // Every session mutation goes through here, writing the ref before React
   // state so a handler that runs between two renders still sees the last edit.
+  // Single write path for session changes: the ref, the React state and the
+  // working-set entry of the owning image always move together.
+  const applySessionChange = useCallback((next: EditorSession) => {
+    sessionRef.current = next
+    setSession(next)
+    if (activeRootIdRef.current) imageSessionsRef.current.set(activeRootIdRef.current, next)
+  }, [])
+
   const updateSession = useCallback((updater: (prev: EditorSession) => EditorSession) => {
     const prev = sessionRef.current
     const next = updater(prev)
     if (next === prev) return
-    sessionRef.current = next
-    setSession(next)
-    // Every session change must land back in the working set, or switching
-    // images would install a stale snapshot and drop the user's edits.
-    if (activeRootIdRef.current) imageSessionsRef.current.set(activeRootIdRef.current, next)
-  }, [])
+    applySessionChange(next)
+  }, [applySessionChange])
 
   /** Live gesture output (slider sweep); the state comes from the session. */
   const editVisibleState = useCallback(
@@ -476,11 +482,7 @@ export function App() {
           currentDraftIdRef.current = snapshot.docId
           resetDocumentUi(decoded)
         },
-        commit: (next) => {
-          sessionRef.current = next
-          setSession(next)
-          if (activeRootIdRef.current) imageSessionsRef.current.set(activeRootIdRef.current, next)
-        },
+        commit: (next) => applySessionChange(next),
         flushPending: () => flushPendingPersist(),
         setBusy: (busy) => setIsProcessing(busy),
         onError: (error, failure) => {
@@ -493,11 +495,12 @@ export function App() {
           showToast(failure === 'restore' ? '恢复草稿失败，原图可能损坏' : '图片解析失败', 'error')
         },
       }),
-    [flushPendingPersist, resetDocumentUi, showToast]
+    [flushPendingPersist, resetDocumentUi, showToast, applySessionChange]
   )
 
-  // Open or replace the working image. Replacing keeps the previous document in
-  // the undo tree, so an accidental switch can be walked back.
+  // Loads the file as a NEW image in the working set: a standalone session
+  // (own history tree) plus a list entry. The previous image stays in the left
+  // list — switching between images happens there, never through undo.
   const loadFile = useCallback(
     async (nextFile: File) => {
       const validation = validateImageFile(nextFile)
@@ -507,12 +510,17 @@ export function App() {
         return
       }
 
+      if (openImages.length >= MAX_OPEN_IMAGES) {
+        showToast(`工作集最多同时打开 ${MAX_OPEN_IMAGES} 张图片，请先在左侧列表移除部分图片`, 'info')
+        return
+      }
+
       setErrorMessage(null)
       const rootId = createDraftId()
       switchActiveRoot(rootId)
       let dims = { width: 0, height: 0 }
       const opened = await documentSwitcher.openStandaloneDocument(nextFile, (decoded) => {
-        setRootOriginal(decoded)
+        setRootOriginal(rootId, decoded)
         dims = { width: decoded.width, height: decoded.height }
         return {
           docId: rootId,
@@ -528,7 +536,7 @@ export function App() {
         showToast(`已载入 ${nextFile.name}，完全在本地处理`, 'success')
       }
     },
-    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot]
+    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, openImages]
   )
 
   // Crop drag output: visible immediately, not yet an undoable step.
@@ -555,16 +563,20 @@ export function App() {
   // parameters against another document's pixels. A switch still in flight is
   // chained from, so a repeated ⌘Z keeps walking back through history.
   const handleUndo = useCallback(() => {
+    // An erase run owns the active session until it lands; undoing mid-run
+    // would let the result chain onto a tree the user already walked away from.
+    if (isSmartErasing) return
     const from = documentSwitcher.pendingSession() ?? sessionRef.current
     const next = undoSession(from)
     if (next !== from) void documentSwitcher.applySession(next)
-  }, [documentSwitcher])
+  }, [documentSwitcher, isSmartErasing])
 
   const handleRedo = useCallback(() => {
+    if (isSmartErasing) return
     const from = documentSwitcher.pendingSession() ?? sessionRef.current
     const next = redoSession(from)
     if (next !== from) void documentSwitcher.applySession(next)
-  }, [documentSwitcher])
+  }, [documentSwitcher, isSmartErasing])
 
   const handleRevert = useCallback(() => {
     if (!decodedSource || !file) return
@@ -834,39 +846,55 @@ export function App() {
   // active image is closed, lands on the most recently opened remaining one.
   const handleSelectImage = useCallback(
     (rootId: string) => {
+      // Switching mid-erase would let the result chain onto (or wipe masks of)
+      // an image the user is no longer looking at.
+      if (isSmartErasing) return
       if (rootId === activeRootIdRef.current) return
       const target = imageSessionsRef.current.get(rootId)
       if (!target) return
       switchActiveRoot(rootId)
-      void documentSwitcher.applySession(target)
+      void documentSwitcher.applySession(target).then(() => {
+        // A silently aborted switch (an edit landed during the decode) leaves
+        // the previous document visible — follow the session, not the click.
+        if (sessionRef.current !== target) {
+          switchActiveRoot(findRootIdForSession(imageSessionsRef.current, sessionRef.current))
+        }
+      })
     },
-    [documentSwitcher, switchActiveRoot]
+    [documentSwitcher, switchActiveRoot, isSmartErasing]
   )
 
   const handleCloseImage = useCallback(
     (rootId: string) => {
+      if (isSmartErasing) return
       const entry = openImages.find((img) => img.rootId === rootId)
       if (!entry) return
       flushPendingPersist()
       URL.revokeObjectURL(entry.url)
       imageSessionsRef.current.delete(rootId)
+      rootOriginalMap.current.delete(rootId)
       const remaining = openImages.filter((img) => img.rootId !== rootId)
       setOpenImages(remaining)
       if (rootId !== activeRootIdRef.current) return
       const next = remaining[remaining.length - 1] ?? null
       switchActiveRoot(next?.rootId ?? null)
       if (next) {
-        void documentSwitcher.applySession(imageSessionsRef.current.get(next.rootId)!)
+        const target = imageSessionsRef.current.get(next.rootId)!
+        void documentSwitcher.applySession(target).then(() => {
+          if (sessionRef.current !== target) {
+            switchActiveRoot(findRootIdForSession(imageSessionsRef.current, sessionRef.current))
+          }
+        })
       } else {
         // Last image closed: back to the landing screen.
-        rootOriginalRef.current = null
+        rootOriginalMap.current.clear()
         sessionRef.current = EMPTY_SESSION
         setSession(EMPTY_SESSION)
         setFile(null)
         setDecodedSource(null)
       }
     },
-    [openImages, documentSwitcher, switchActiveRoot, flushPendingPersist]
+    [openImages, documentSwitcher, switchActiveRoot, flushPendingPersist, isSmartErasing]
   )
 
   // Watermark erase: bake the current state at full resolution, run the filler
@@ -1146,12 +1174,17 @@ export function App() {
   const restoreLocalDraft = useCallback(
     async (local: LocalHistoryItem) => {
       const restoredFile = new File([local.originalBlob], local.fileName, { type: local.mimeType })
+      const alreadyListed = openImages.some((img) => img.rootId === local.id)
+      if (!alreadyListed && openImages.length >= MAX_OPEN_IMAGES) {
+        showToast(`工作集最多同时打开 ${MAX_OPEN_IMAGES} 张图片，请先在左侧列表移除部分图片`, 'info')
+        return
+      }
       switchActiveRoot(local.id)
       let dims = { width: 0, height: 0 }
       const restored = await documentSwitcher.openStandaloneDocument(
         restoredFile,
         (decoded) => {
-          setRootOriginal(decoded)
+          setRootOriginal(local.id, decoded)
           dims = { width: decoded.width, height: decoded.height }
           return { docId: local.id, file: restoredFile, state: local.editorState }
         },
@@ -1166,7 +1199,7 @@ export function App() {
       setShowHistoryDrawer(false)
       showToast(`已恢复草稿：${local.title}`, 'success')
     },
-    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot]
+    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, openImages]
   )
 
   // Restore project from history item
@@ -1492,6 +1525,7 @@ export function App() {
           <ImageListPanel
             images={openImages}
             activeRootId={activeRootId}
+            disabled={isSmartErasing}
             onSelect={handleSelectImage}
             onClose={handleCloseImage}
           />
@@ -1500,7 +1534,7 @@ export function App() {
           <main className="w-full h-full">
             <CanvasViewport
               source={decodedSource}
-              compareSource={pickCompareSource(decodedSource, rootOriginalRef.current)}
+              compareSource={resolveCompareSource(decodedSource, rootOriginalMap.current, activeRootIdRef.current)}
               state={currentState}
               activeTool={activeTool}
               markupMode={markupMode}

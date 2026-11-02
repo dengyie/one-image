@@ -141,6 +141,21 @@ export function pickCompareSource<T>(current: T, root: T | null | undefined): T 
   return root && root !== current ? root : null
 }
 
+/**
+ * Per-root compare resolution for the multi-image working set: looks up the
+ * active image's own root snapshot and only switches the view when that root
+ * differs from the current (possibly derived) document. A singleton root slot
+ * here would show one image's original on top of another image.
+ */
+export function resolveCompareSource<T>(
+  current: T,
+  roots: ReadonlyMap<string, T> | null | undefined,
+  activeRootId: string | null | undefined
+): T | null {
+  const root = roots && activeRootId ? roots.get(activeRootId) ?? null : null
+  return pickCompareSource(current, root)
+}
+
 // Cursor-anchored wheel zoom for the spatial viewport transform
 // `translate(pan) scale(s)` with transform-origin at the element center (the
 // element is flex-centered in the container). The element point under the

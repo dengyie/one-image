@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react'
+import { formatBytes as formatSize } from '../../domain/format'
 import { UiIcon } from '../ui/UiIcon'
 
 interface TopActionBarProps {
@@ -64,12 +65,6 @@ export const TopActionBar: React.FC<TopActionBarProps> = ({
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
-
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  }
 
   return (
     <header className="fixed top-14 sm:top-3 inset-x-0 z-40 mx-auto flex w-fit max-w-[calc(100vw-1rem)] items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-full bg-zinc-900/85 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/60 text-xs text-zinc-300 transition-all select-none sm:gap-2">
