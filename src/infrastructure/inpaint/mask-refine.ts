@@ -174,7 +174,9 @@ export interface DetectStrokeOptions {
   minComponentPixels?: number
   /**
    * Boxes whose stroke pixels exceed this share are photo content (an edge or
-   * texture fills its box), not a sparse overlay; they are dropped.
+   * texture fills its box), not an overlay; they are dropped. Bold watermark
+   * glyphs measure around 0.6-0.7, photo textures near 0.9+, so the gate sits
+   * between them.
    */
   maxDensity?: number
   /** Hard cap on returned boxes, largest first. */
@@ -201,7 +203,7 @@ export function detectStrokeRegions(image: RgbaGrid, options: DetectStrokeOption
   const radius = Math.max(1, Math.round(options.radius ?? 12))
   const dilate = Math.max(0, Math.round(options.dilate ?? 2))
   const minComponentPixels = Math.max(1, Math.round(options.minComponentPixels ?? 24))
-  const maxDensity = Math.min(1, Math.max(0, options.maxDensity ?? 0.6))
+  const maxDensity = Math.min(1, Math.max(0, options.maxDensity ?? 0.8))
   const maxRegions = Math.max(1, Math.round(options.maxRegions ?? 300))
 
   const gray = toGray(image)
