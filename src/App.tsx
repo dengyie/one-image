@@ -70,7 +70,7 @@ import { drawEraseAiMask } from './application/editor-renderer'
 import { refineMaskToStrokes } from './infrastructure/inpaint/mask-refine'
 import { countHolePixels } from './infrastructure/inpaint/classical-fill'
 import { routeFill, resolveEraseProvider, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
-import { computeFitScale, clampZoom, isNearActualSize, MAX_FIT_SCALE } from './components/image-editor-model'
+import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
 /** Stable per-document id; also the IndexedDB draft id for local drafts. */
@@ -1295,7 +1295,14 @@ export function App() {
             onOpenImageGen={imagegenEnabled ? () => setShowImageGenModal(true) : undefined}
             canUndo={canUndoSession(session)}
             canRedo={canRedoSession(session)}
-            canReset={canUndoSession(session) || Boolean(session.draft)}
+            // Viewport-only movement (pan/zoom live outside the session tree)
+            // must also make reset reachable, or a moved image can never be
+            // brought back to its origin.
+            canReset={
+              canUndoSession(session) ||
+              Boolean(session.draft) ||
+              (Boolean(decodedSource) && isViewportOffFit(panOffset, zoomScale, computeFitScale(decodedSource, viewportSize())))
+            }
             isComparingOriginal={isComparingOriginal}
             isProcessing={isProcessing}
             onUndo={handleUndo}

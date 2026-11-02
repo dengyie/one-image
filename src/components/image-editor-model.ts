@@ -116,6 +116,20 @@ export function computeFitScale(
   return clampZoom(Number(scale.toFixed(2)))
 }
 
+/**
+ * Whether the viewport sits anywhere other than the fitted origin. Panning and
+ * zooming live outside the session tree, so a pan-only document has no undo
+ * steps and no draft — without this check the reset button would stay disabled
+ * and a moved image could never be brought back to its origin.
+ */
+export function isViewportOffFit(
+  panOffset: { x: number; y: number },
+  zoomScale: number,
+  fitScale: number
+): boolean {
+  return panOffset.x !== 0 || panOffset.y !== 0 || zoomScale !== fitScale
+}
+
 // Cursor-anchored wheel zoom for the spatial viewport transform
 // `translate(pan) scale(s)` with transform-origin at the element center (the
 // element is flex-centered in the container). The element point under the
