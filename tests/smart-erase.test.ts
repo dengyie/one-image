@@ -113,4 +113,34 @@ describe('smart-erase orchestrator', () => {
     fake.emit({ type: 'done', runId: fake.sent[1].runId, rgba: new Uint8ClampedArray([2, 2, 2, 255]).buffer })
     await Promise.all([p1, p2])
   })
+
+  it('forwards every model-free provider verbatim', async () => {
+    const fake = new FakeWorker()
+    const providers = ['blur', 'pixel', 'solid'] as const
+    const runs = providers.map((provider) =>
+      runSmartErase({ ...makeInput(3), provider }, () => {}, { workerFactory: () => fake })
+    )
+    expect(fake.sent.map((r) => r.provider)).toEqual(['blur', 'pixel', 'solid'])
+    for (const req of fake.sent) {
+      fake.emit({ type: 'done', runId: req.runId, rgba: new Uint8ClampedArray([3, 3, 3, 255]).buffer })
+    }
+    await Promise.all(runs)
+  })
+
+  it('accepts a fresh run after a failed one, carrying live buffers per request', async () => {
+    // The erase handler retries a failed classical run with MI-GAN. This pins
+    // the shape that retry relies on: a rejected run must not poison the
+    // orchestrator, and each request must carry its own full-length buffers.
+    const first = new FakeWorker()
+    const failed = runSmartErase(makeInput(1), () => {}, { workerFactory: () => first })
+    first.emit({ type: 'error', runId: first.sent[0].runId, message: 'too large' })
+    await expect(failed).rejects.toThrow('too large')
+
+    const second = new FakeWorker()
+    const retried = runSmartErase(makeInput(2), () => {}, { workerFactory: () => second })
+    expect(second.sent[0].image.byteLength).toBe(4)
+    expect(second.sent[0].provider).toBe('migan')
+    second.emit({ type: 'done', runId: second.sent[0].runId, rgba: new Uint8ClampedArray([2, 2, 2, 255]).buffer })
+    await expect(retried).resolves.toBeDefined()
+  })
 })

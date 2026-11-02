@@ -155,14 +155,26 @@ async function run(req: SmartEraseRequest): Promise<ArrayBuffer> {
     // a full-frame RGBA plane that only the feathered alpha ever shows, so the
     // "nothing outside the mask changes" guarantee comes from compositeRgba.
     report({ type: 'stage', stage: 'inference' })
-    const generated =
-      req.provider === 'classical'
-        ? fillHolesClassical(imagePlane, maskPlane)
-        : req.provider === 'blur'
-        ? fillHolesBlur(imagePlane, maskPlane)
-        : req.provider === 'pixel'
-        ? fillHolesPixelate(imagePlane, maskPlane)
-        : fillHolesSolid(imagePlane, maskPlane)
+    let generated: Uint8ClampedArray
+    switch (req.provider) {
+      case 'classical':
+        generated = fillHolesClassical(imagePlane, maskPlane)
+        break
+      case 'blur':
+        generated = fillHolesBlur(imagePlane, maskPlane)
+        break
+      case 'pixel':
+        generated = fillHolesPixelate(imagePlane, maskPlane)
+        break
+      case 'solid':
+        generated = fillHolesSolid(imagePlane, maskPlane)
+        break
+      default: {
+        // Exhaustiveness anchor: a new FillProvider must add its own case.
+        const unhandled: never = req.provider
+        throw new Error(`inpaint worker: unknown filler ${String(unhandled)}`)
+      }
+    }
     const blended = compositeRgba(imagePlane, { data: generated, width: req.width, height: req.height }, alphaPlane)
     return blended.buffer as ArrayBuffer
   }
