@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampZoom, computeCursorAnchoredPan, computeFitScale, createCropGesture, isNearActualSize, mapSourceRectToViewport, mapPointerToSource, updateCropGesture, MAX_FIT_SCALE, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE } from '../src/components/image-editor-model'
+import { clampZoom, computeCursorAnchoredPan, computeFitScale, createCropGesture, isNearActualSize, isViewportOffFit, mapSourceRectToViewport, mapPointerToSource, updateCropGesture, MAX_FIT_SCALE, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE } from '../src/components/image-editor-model'
 
 describe('image editor interaction model', () => {
   it('converts a pointer drag into a bounded crop move', () => {
@@ -160,5 +160,20 @@ describe('shared zoom domain', () => {
     expect(isNearActualSize(0.95)).toBe(true)
     expect(isNearActualSize(0.8)).toBe(false)
     expect(isNearActualSize(1.2)).toBe(false)
+  })
+})
+
+describe('isViewportOffFit', () => {
+  const fit = 0.64
+  it('is false only at the fitted origin', () => {
+    expect(isViewportOffFit({ x: 0, y: 0 }, fit, fit)).toBe(false)
+  })
+  it('flags pan on either axis even at fit zoom', () => {
+    expect(isViewportOffFit({ x: 12, y: 0 }, fit, fit)).toBe(true)
+    expect(isViewportOffFit({ x: 0, y: -3 }, fit, fit)).toBe(true)
+  })
+  it('flags a zoom that drifted from fit with zero pan', () => {
+    expect(isViewportOffFit({ x: 0, y: 0 }, 1, fit)).toBe(true)
+    expect(isViewportOffFit({ x: 0, y: 0 }, fit + 0.01, fit)).toBe(true)
   })
 })
