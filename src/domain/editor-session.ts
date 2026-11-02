@@ -144,3 +144,12 @@ export function openDocument(session: EditorSession, snapshot: EditorSnapshot): 
     draft: null,
   }
 }
+
+/**
+ * A fresh history tree rooted at `snapshot` — the session shape for an image
+ * loaded into the multi-image working set. Images in the set are decoupled:
+ * each owns its tree, so undo/redo never walks into another image.
+ */
+export function standaloneSession(snapshot: EditorSnapshot): EditorSession {
+  return { history: { past: [], present: snapshot, future: [] }, draft: null }
+}

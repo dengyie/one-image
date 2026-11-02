@@ -2,6 +2,7 @@ import type { DecodedSource } from './editor-renderer'
 import {
   openDocument as openInTree,
   sessionSnapshot,
+  standaloneSession,
   type EditorSession,
   type EditorSnapshot,
 } from '../domain/editor-session'
@@ -36,6 +37,16 @@ export interface DocumentSwitcher {
    * time, so an edit made during the decode stays undoable.
    */
   openDocument(
+    file: File,
+    prepare: (decoded: DecodedSource) => EditorSnapshot,
+    failure?: 'load' | 'restore'
+  ): Promise<boolean>
+  /**
+   * Decodes a file into a STANDALONE session (fresh history tree) for the
+   * multi-image working set: the previous document is not chained into the new
+   * session, so undo never crosses images.
+   */
+  openStandaloneDocument(
     file: File,
     prepare: (decoded: DecodedSource) => EditorSnapshot,
     failure?: 'load' | 'restore'
@@ -135,5 +146,30 @@ export function createDocumentSwitcher(hooks: DocumentSwitchHooks): DocumentSwit
     }
   }
 
-  return { applySession, openDocument, pendingSession: () => pending }
+  async function openStandaloneDocument(
+    file: File,
+    prepare: (decoded: DecodedSource) => EditorSnapshot,
+    failure: 'load' | 'restore' = 'load'
+  ): Promise<boolean> {
+    const myEpoch = begin()
+    try {
+      hooks.flushPending()
+      const decoded = await hooks.decode(file)
+      if (myEpoch !== epoch) {
+        decoded.close()
+        return false
+      }
+      const snapshot = prepare(decoded)
+      hooks.install(snapshot, decoded)
+      hooks.commit(standaloneSession(snapshot))
+      return true
+    } catch (error) {
+      if (myEpoch === epoch) hooks.onError(error, failure)
+      return false
+    } finally {
+      settle(myEpoch)
+    }
+  }
+
+  return { applySession, openDocument, openStandaloneDocument, pendingSession: () => pending }
 }
