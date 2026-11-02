@@ -68,7 +68,8 @@ import type { WatermarkLayout, WatermarkEraseType, WatermarkTab } from './compon
 import { runSmartErase, disposeSmartEraseWorker, SMART_ERASE_MAX_EDGE, type SmartEraseStage } from './infrastructure/inpaint/smart-erase'
 import { drawEraseAiMask } from './application/editor-renderer'
 import { refineMaskToStrokes } from './infrastructure/inpaint/mask-refine'
-import { routeFill, type SmartEraseMode } from './infrastructure/inpaint/auto-route'
+import { countHolePixels } from './infrastructure/inpaint/classical-fill'
+import { routeFill, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
 import { computeFitScale, clampZoom, isNearActualSize, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
@@ -739,59 +740,35 @@ export function App() {
     [addAnnotation, showToast]
   )
 
-  const handleAddEraseRegion = useCallback(
-    (eraseType: WatermarkEraseType) => {
-      if (!sessionState(sessionRef.current)) return
-      // The mask is placed against the crop the user is looking at, so it is
-      // computed inside the session rather than from a render snapshot.
-      commitEdit((state) => {
-        const cropW = state.crop.width
-        const cropH = state.crop.height
-        const boxW = Math.min(Math.round(cropW * 0.4), 320)
-        const boxH = Math.min(Math.round(cropH * 0.2), 120)
-        const boxX = state.crop.x + Math.round((cropW - boxW) / 2)
-        const boxY = state.crop.y + Math.round((cropH - boxH) / 2)
-        const layerId = `erase_${Date.now()}`
+  // Every erase mode shares one mask representation: an `erase-ai` layer that
+  // the run handler turns into the selected filler. Blur/pixel/blackout used to
+  // mint live annotation layers here, which made them whole-rectangle effects
+  // and left brush strokes (always erase-ai) unusable in those modes.
+  const handleAddEraseRegion = useCallback(() => {
+    if (!sessionState(sessionRef.current)) return
+    // The mask is placed against the crop the user is looking at, so it is
+    // computed inside the session rather than from a render snapshot.
+    commitEdit((state) => {
+      const cropW = state.crop.width
+      const cropH = state.crop.height
+      const boxW = Math.min(Math.round(cropW * 0.4), 320)
+      const boxH = Math.min(Math.round(cropH * 0.2), 120)
+      const boxX = state.crop.x + Math.round((cropW - boxW) / 2)
+      const boxY = state.crop.y + Math.round((cropH - boxH) / 2)
+      const layerId = `erase_${Date.now()}`
 
-        const newLayer: AnnotationLayer =
-          eraseType === 'blackout'
-            ? {
-                id: layerId,
-                type: 'rect',
-                rect: { x: boxX, y: boxY, width: boxW, height: boxH },
-                color: '#000000',
-                strokeWidth: 0,
-                opacity: 1,
-              }
-            : eraseType === 'ai'
-            ? {
-                id: layerId,
-                type: 'erase-ai',
-                rect: { x: boxX, y: boxY, width: boxW, height: boxH },
-                color: '#34d399',
-                strokeWidth: 0,
-              }
-            : {
-                id: layerId,
-                type: 'mosaic',
-                rect: { x: boxX, y: boxY, width: boxW, height: boxH },
-                color: '#000000',
-                strokeWidth: 0,
-                mosaicType: eraseType === 'blur' ? 'blur' : 'pixel',
-                mosaicBlockSize: eraseType === 'blur' ? 24 : 16,
-              }
+      const newLayer: AnnotationLayer = {
+        id: layerId,
+        type: 'erase-ai',
+        rect: { x: boxX, y: boxY, width: boxW, height: boxH },
+        color: '#34d399',
+        strokeWidth: 0,
+      }
 
-        return { ...state, annotations: [...(state.annotations ?? []), newLayer] }
-      })
-      showToast(
-        eraseType === 'ai'
-          ? '已生成智能修复选区（绿色虚线框），点击「运行智能修复」执行'
-          : '已在画面中央生成水印消除遮罩选区（支持自由移动或缩放）',
-        'success'
-      )
-    },
-    [commitEdit, showToast]
-  )
+      return { ...state, annotations: [...(state.annotations ?? []), newLayer] }
+    })
+    showToast('已生成消除选框（绿色虚线），点击「运行」执行', 'success')
+  }, [commitEdit, showToast])
 
   const handleClearEraseRegions = useCallback(() => {
     const state = sessionState(sessionRef.current)
@@ -802,16 +779,24 @@ export function App() {
     }))
   }, [commitEdit])
 
-  // Smart erase: bake the current state at full resolution, run browser-local
-  // MI-GAN under the pending marquee regions, and open the result as a new
-  // document. Pixels outside the mask are preserved bit-for-bit by the
-  // compositor; everything here stays on-device.
-  const handleRunSmartErase = useCallback(async () => {
+  // Watermark erase: bake the current state at full resolution, run the filler
+  // chosen by the erase mode in the browser-local worker under the pending mask
+  // regions, and open the result as a new document. Pixels outside the mask are
+  // preserved bit-for-bit by the compositor; everything here stays on-device.
+  const ERASE_ENGINE_LABELS: Record<FillProvider, string> = {
+    blur: '磨砂模糊',
+    pixel: '像素打码',
+    solid: '实心遮蔽',
+    classical: '本地扩散',
+    migan: 'MI-GAN 合成',
+  }
+
+  const handleRunErase = useCallback(async (eraseType: WatermarkEraseType) => {
     const state = sessionState(sessionRef.current)
     if (!decodedSource || !file || !state) return
     const aiLayers = (state.annotations ?? []).filter((layer) => layer.type === 'erase-ai' && layer.rect)
     if (aiLayers.length === 0) {
-      showToast('请先生成智能修复选区', 'info')
+      showToast('请先涂抹或框选水印', 'info')
       return
     }
 
@@ -824,11 +809,12 @@ export function App() {
       const snapshot = await exportEditor(decodedSource, state, factory, 'image/png', 1)
       const bitmap = await createImageBitmap(snapshot)
       const { width, height } = bitmap
-      // The pipeline pads to 512-aligned tiles internally; an unbounded source
-      // (a 25MB PNG can be 10000px wide) would blow the WASM linear memory.
+      // The AI pipeline pads to 512-aligned tiles internally; an unbounded
+      // source (a 25MB PNG can be 10000px wide) would blow the WASM linear
+      // memory. The guard applies to every filler so the limit stays one rule.
       if (Math.max(width, height) > SMART_ERASE_MAX_EDGE) {
         bitmap.close()
-        throw new Error(`图片最大边 ${Math.max(width, height)}px 超过智能修复上限 ${SMART_ERASE_MAX_EDGE}px，请先裁剪或缩放`)
+        throw new Error(`图片最大边 ${Math.max(width, height)}px 超过消除上限 ${SMART_ERASE_MAX_EDGE}px，请先裁剪或缩放`)
       }
 
       const makeCanvas = () => factory.create(width, height)
@@ -850,28 +836,36 @@ export function App() {
 
       // Tighten whatever the user drew down to the overlay strokes it actually
       // covers. A box around a watermark otherwise hands the filler a large
-      // rectangle of clean background to re-synthesize — the exact reason the
-      // result looked "changed". Falls back to the drawn mask when no stroke is
-      // distinguishable, so this can only ever shrink towards the watermark.
-      const refined = refineMaskToStrokes(
-        { data: imageData.data, width, height },
-        { data: maskData.data, width, height }
-      )
-      maskData.data.set(refined)
+      // rectangle of clean background to scramble — the exact reason the result
+      // looked "changed". Solid blackout is the guaranteed-cover option and
+      // keeps the region exactly as drawn; a filler that detects no stroke at
+      // all falls back to the drawn mask, so this can only ever shrink.
+      if (eraseType !== 'blackout') {
+        const refined = refineMaskToStrokes(
+          { data: imageData.data, width, height },
+          { data: maskData.data, width, height }
+        )
+        maskData.data.set(refined)
+      }
+      const maskGrid = { data: maskData.data, width, height }
+      if (countHolePixels(maskGrid) === 0) {
+        showToast('选区为空：请先涂抹或框选水印', 'info')
+        return
+      }
 
-      // Route the hole to a filler: small holes to local diffusion (no model,
-      // no resampling), larger ones to MI-GAN.
-      const decision = routeFill({
-        mode: eraseMode,
-        mask: { data: refined, width, height },
-        imageWidth: width,
-        imageHeight: height,
-      })
+      // Route the hole to a filler: the AI mode picks between local diffusion
+      // and MI-GAN by hole size; the other modes are their own filler.
+      const provider: FillProvider =
+        eraseType === 'ai'
+          ? routeFill({ mode: eraseMode, mask: maskGrid, imageWidth: width, imageHeight: height }).provider
+          : eraseType === 'blackout'
+          ? 'solid'
+          : eraseType
 
-      // Composite alpha: the refined mask blurred twice so the interior stays
-      // fully generated while edges feather into untouched pixels. It is built
-      // from the same refined mask the filler sees, so the blend window can
-      // never be wider than the hole.
+      // Composite alpha: the working mask blurred twice so the interior stays
+      // fully covered while edges feather into untouched pixels. It is built
+      // from the same mask the filler sees, so the blend window can never be
+      // wider than the hole.
       const refineCanvas = makeCanvas()
       ctxOf(refineCanvas).putImageData(maskData, 0, 0)
       const alphaCanvas = makeCanvas()
@@ -886,13 +880,13 @@ export function App() {
       let result: ImageData
       try {
         result = await runSmartErase(
-          { image: imageData, mask: maskData, composite: alphaData, provider: decision.provider },
+          { image: imageData, mask: maskData, composite: alphaData, provider },
           setSmartEraseStage
         )
       } catch (err) {
         // The classical filler refuses pathologically large working sets; fall
         // back to the model rather than failing the whole edit.
-        if (decision.provider !== 'classical') throw err
+        if (provider !== 'classical') throw err
         result = await runSmartErase(
           { image: imageData, mask: maskData, composite: alphaData, provider: 'migan' },
           setSmartEraseStage
@@ -912,7 +906,7 @@ export function App() {
           )
 
       const baseName = file.name.replace(/\.[^/.]+$/, '')
-      const resultFile = new File([blob], `${baseName}_smart-erased.png`, { type: 'image/png' })
+      const resultFile = new File([blob], `${baseName}_erased.png`, { type: 'image/png' })
       // The pending marquees have served their purpose. Clear them from the
       // source document BEFORE switching, so undoing back to it does not
       // resurrect a stale "pending" frame over an already-erased region.
@@ -926,13 +920,12 @@ export function App() {
         state: createEditorState(decoded.width, decoded.height),
       }))
       if (opened) {
-        const engine = decision.provider === 'classical' ? '本地扩散' : 'MI-GAN 合成'
-        showToast(`智能修复完成（${engine}）：${aiLayers.length} 个区域，掩膜外像素未改动`, 'success')
+        showToast(`消除完成（${ERASE_ENGINE_LABELS[provider]}）：${aiLayers.length} 个区域，掩膜外像素未改动`, 'success')
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       setSmartEraseError(message)
-      showToast(`智能修复失败：${message}`, 'error')
+      showToast(`消除失败：${message}`, 'error')
     } finally {
       setIsSmartErasing(false)
       setSmartEraseStage(null)
@@ -1389,7 +1382,7 @@ export function App() {
             onAddEraseRegion={handleAddEraseRegion}
             onCheckProvenanceTarget={handleCheckProvenanceTarget}
             hasEraseAiRegions={hasEraseAiRegions}
-            onRunSmartErase={() => void handleRunSmartErase()}
+            onRunErase={(type) => void handleRunErase(type)}
             isSmartErasing={isSmartErasing}
             smartEraseStage={smartEraseStage}
             smartEraseError={smartEraseError}

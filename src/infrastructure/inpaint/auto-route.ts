@@ -16,8 +16,10 @@
 import type { RgbaGrid } from './mask-refine'
 import { countHolePixels } from './classical-fill'
 
-export type FillProvider = 'classical' | 'migan'
-/** What the user picked in the toolbar. */
+export type FillProvider = 'classical' | 'migan' | 'blur' | 'pixel' | 'solid'
+/** What the user picked in the toolbar. The erase tab's blur/pixel/blackout
+ * options map straight onto the last three; `routeFill` only ever returns the
+ * first two because routing applies to the smart-repair mode alone. */
 export type SmartEraseMode = 'auto' | 'classical' | 'migan'
 
 export interface RouteInput {

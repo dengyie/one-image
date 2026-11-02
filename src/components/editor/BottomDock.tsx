@@ -60,12 +60,12 @@ interface BottomDockProps {
 
   // Watermark props
   onAddWatermark: (options: { text: string; layout: WatermarkLayout; opacity: number; color: string }) => void
-  onAddEraseRegion: (eraseType: WatermarkEraseType) => void
+  onAddEraseRegion: () => void
   onCheckProvenanceTarget: (target: 'current' | 'original') => void
   provenanceResultDetail: ProvenanceResult | null
   provenanceError?: string | null
   hasEraseAiRegions?: boolean
-  onRunSmartErase?: () => void
+  onRunErase?: (eraseType: WatermarkEraseType) => void
   isSmartErasing?: boolean
   smartEraseStage?: SmartEraseStage | null
   smartEraseError?: string | null
@@ -141,7 +141,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   provenanceResultDetail,
   provenanceError,
   hasEraseAiRegions,
-  onRunSmartErase,
+  onRunErase,
   isSmartErasing,
   smartEraseStage,
   smartEraseError,
@@ -228,7 +228,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
             provenanceResult={provenanceResultDetail}
             provenanceError={provenanceError}
             hasEraseAiRegions={hasEraseAiRegions}
-            onRunSmartErase={onRunSmartErase}
+            onRunErase={onRunErase}
             isSmartErasing={isSmartErasing}
             smartEraseStage={smartEraseStage}
             smartEraseError={smartEraseError}
