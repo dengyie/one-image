@@ -184,8 +184,24 @@ export function App() {
   // The image the user actually brought in (load/paste/换图 or a history
   // restore). Erase results open as derived documents, so 原图对比 must keep
   // comparing against this root — against the latest derived bitmap the
-  // feature would show two identical frames and look broken.
+  // feature would show two identical frames and look broken. Held as a
+  // standalone canvas snapshot: the document switcher closes replaced decoded
+  // bitmaps, so a raw reference would go dead on the first erase.
   const rootOriginalRef = useRef<DecodedSource | null>(null)
+  const setRootOriginal = useCallback(
+    (decoded: DecodedSource) => {
+      const snapshot = factory.create(decoded.width, decoded.height)
+      const ctx = snapshot.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
+      decoded.draw(ctx, decoded.width, decoded.height)
+      rootOriginalRef.current = {
+        width: decoded.width,
+        height: decoded.height,
+        draw: (target, width, height) => target.drawImage(snapshot as unknown as CanvasImageSource, 0, 0, width, height),
+        close: () => {},
+      }
+    },
+    [factory]
+  )
 
   // Toast feedback
   const [toast, setToast] = useState<{ text: string; type: 'info' | 'success' | 'error' } | null>(null)
@@ -475,7 +491,7 @@ export function App() {
 
       setErrorMessage(null)
       const opened = await documentSwitcher.openDocument(nextFile, (decoded) => {
-        rootOriginalRef.current = decoded
+        setRootOriginal(decoded)
         return {
           docId: createDraftId(),
           file: nextFile,
@@ -486,7 +502,7 @@ export function App() {
         showToast(`已载入 ${nextFile.name}，完全在本地处理`, 'success')
       }
     },
-    [documentSwitcher, showToast]
+    [documentSwitcher, showToast, setRootOriginal]
   )
 
   // Crop drag output: visible immediately, not yet an undoable step.
@@ -1067,7 +1083,7 @@ export function App() {
       const restored = await documentSwitcher.openDocument(
         restoredFile,
         (decoded) => {
-          rootOriginalRef.current = decoded
+          setRootOriginal(decoded)
           return { docId: local.id, file: restoredFile, state: local.editorState }
         },
         'restore'
@@ -1076,7 +1092,7 @@ export function App() {
       setShowHistoryDrawer(false)
       showToast(`已恢复草稿：${local.title}`, 'success')
     },
-    [documentSwitcher, showToast]
+    [documentSwitcher, showToast, setRootOriginal]
   )
 
   // Restore project from history item
