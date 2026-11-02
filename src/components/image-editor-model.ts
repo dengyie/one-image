@@ -130,6 +130,17 @@ export function isViewportOffFit(
   return panOffset.x !== 0 || panOffset.y !== 0 || zoomScale !== fitScale
 }
 
+/**
+ * Which bitmap 原图对比 should show. Derived documents (erase results) replace
+ * the working image, so compare must fall back to the user's root image;
+ * comparing the current document against itself would show two identical
+ * frames. When the root is the same frame (or absent) the current document is
+ * used and compare behaves exactly as before derived documents existed.
+ */
+export function pickCompareSource<T>(current: T, root: T | null | undefined): T | null {
+  return root && root !== current ? root : null
+}
+
 // Cursor-anchored wheel zoom for the spatial viewport transform
 // `translate(pan) scale(s)` with transform-origin at the element center (the
 // element is flex-centered in the container). The element point under the

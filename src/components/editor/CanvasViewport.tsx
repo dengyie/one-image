@@ -35,6 +35,12 @@ interface CanvasViewportProps {
   textColor: string
   textSize: number
   isComparingOriginal: boolean
+  /**
+   * The user's root image (what they loaded), when it differs from the current
+   * document. Erase results open as derived documents; while comparing, the
+   * viewport shows this root so the feature keeps meaning "original vs now".
+   */
+  compareSource?: DecodedSource | null
   zoomScale: number
   panOffset: { x: number; y: number }
   onZoomChange: (scale: number) => void
@@ -72,6 +78,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   textColor,
   textSize,
   isComparingOriginal,
+  compareSource = null,
   zoomScale,
   panOffset,
   onZoomChange,
@@ -122,14 +129,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   useEffect(() => {
     if (!source || !canvasRef.current) return
     const canvas = canvasRef.current
-    // If comparing original, render pristine source
-    const effectiveState = isComparingOriginal
-      ? createEditorState(source.width, source.height)
+    // If comparing original, render the root image with its own pristine
+    // state: the current document may be a derived bitmap (an erase result),
+    // whose "original" is no longer what the user means by 原图.
+    const viewSource = isComparingOriginal && compareSource ? compareSource : source
+    const effectiveState = isComparingOriginal && compareSource
+      ? createEditorState(viewSource.width, viewSource.height)
       : state
 
     const cancel = schedulePreview(async () => {
       try {
-        const rendered = renderEditor(source, effectiveState, factory, {
+        const rendered = renderEditor(viewSource, effectiveState, factory, {
           maxEdge: PREVIEW_MAX_EDGE,
           showFullSource: activeTool === 'crop',
         })
@@ -148,7 +158,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     })
 
     return cancel
-  }, [source, state, activeTool, isComparingOriginal, factory])
+  }, [source, state, activeTool, isComparingOriginal, compareSource, factory])
 
   // Space key tracking for Pan
   useEffect(() => {
@@ -650,9 +660,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   // against the wrong scale until an unrelated re-render happens to fix it.
   const renderPlan = useMemo(() => {
     if (!source) return { width: 0, height: 0 }
-    const effectiveState = isComparingOriginal ? createEditorState(source.width, source.height) : state
+    const viewSource = isComparingOriginal && compareSource ? compareSource : source
+    const effectiveState = isComparingOriginal && compareSource
+      ? createEditorState(viewSource.width, viewSource.height)
+      : state
     return planRenderDimensions(effectiveState, PREVIEW_MAX_EDGE, activeTool === 'crop')
-  }, [source, state, activeTool, isComparingOriginal])
+  }, [source, state, activeTool, isComparingOriginal, compareSource])
   const canvasWidth = renderPlan.width
   const canvasHeight = renderPlan.height
   // Canvas pixels per source pixel, for draft overlays drawn in canvas space

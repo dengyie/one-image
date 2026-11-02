@@ -590,3 +590,66 @@ describe('brush mosaic rendering', () => {
     expect(log.some((entry) => entry.ops.some((op) => op.startsWith('composite:destination-in')))).toBe(false)
   })
 })
+
+describe('原图对比 render invariant', () => {
+  function recordingFactory(record: { draws: string[]; filters: string[] }): CanvasFactory {
+    return {
+      create(width: number, height: number): RenderCanvas {
+        const canvas = { width, height }
+        const context = {
+          canvas,
+          clearRect: () => {},
+          save: () => {},
+          restore: () => {},
+          beginPath: () => {},
+          rect: () => {},
+          moveTo: () => {},
+          lineTo: () => {},
+          closePath: () => {},
+          clip: () => {},
+          translate: () => {},
+          rotate: () => {},
+          scale: () => {},
+          drawImage: () => { record.draws.push('layer') },
+          set filter(value: string) { record.filters.push(value) },
+        }
+        return { width, height, getContext: () => context as never }
+      },
+    }
+  }
+
+  it('compare view follows the root image geometry with its own pristine state', () => {
+    // 当前文档是 90×60 的派生图；用户根原图是 200×120。
+    const rootSource: DecodedSource = { width: 200, height: 120, draw: () => record.draws.push('source'), close: () => {} }
+    const record = { draws: [] as string[], filters: [] as string[] }
+    const rendered = renderEditor(rootSource, createEditorState(200, 120), recordingFactory(record), { maxEdge: 400 })
+    expect([rendered.width, rendered.height]).toEqual([200, 120])
+    expect(record.draws).toEqual(['source'])
+    for (const f of record.filters) expect(f).toBe('brightness(1) contrast(1) saturate(1) blur(0px)')
+  })
+
+  it('pristine state never leaks edits of the current document into the compare view', () => {
+    const record = { draws: [] as string[], filters: [] as string[] }
+    const source: DecodedSource = { width: 100, height: 100, draw: () => record.draws.push('source'), close: () => {} }
+    const factory = recordingFactory(record)
+    const identity = 'brightness(1) contrast(1) saturate(1) blur(0px)'
+
+    const edited = createEditorState(100, 100)
+    edited.adjustments.brightness = 40
+    edited.annotations = [
+      { id: 'a1', type: 'mosaic', rect: { x: 10, y: 10, width: 50, height: 40 }, color: '#000000', strokeWidth: 1, mosaicType: 'pixel', mosaicBlockSize: 10 },
+    ]
+    renderEditor(source, edited, factory, { maxEdge: 100 })
+    const editedDraws = [...record.draws]
+    const editedFilters = [...record.filters]
+    expect(editedDraws[0]).toBe('source')
+    expect(editedDraws.filter((d) => d === 'layer').length).toBeGreaterThan(0)
+    expect(editedFilters.some((f) => f !== identity)).toBe(true)
+
+    record.draws.length = 0
+    record.filters.length = 0
+    renderEditor(source, createEditorState(100, 100), factory, { maxEdge: 100 })
+    expect(record.draws).toEqual(['source'])
+    for (const f of record.filters) expect(f).toBe(identity)
+  })
+})
