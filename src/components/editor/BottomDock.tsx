@@ -66,6 +66,7 @@ interface BottomDockProps {
   provenanceError?: string | null
   hasEraseAiRegions?: boolean
   onRunErase?: (eraseType: WatermarkEraseType) => void
+  onCleanAllWatermarks?: () => void
   isSmartErasing?: boolean
   smartEraseStage?: SmartEraseStage | null
   smartEraseError?: string | null
@@ -142,6 +143,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   provenanceError,
   hasEraseAiRegions,
   onRunErase,
+  onCleanAllWatermarks,
   isSmartErasing,
   smartEraseStage,
   smartEraseError,
@@ -229,6 +231,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
             provenanceError={provenanceError}
             hasEraseAiRegions={hasEraseAiRegions}
             onRunErase={onRunErase}
+            onCleanAllWatermarks={onCleanAllWatermarks}
             isSmartErasing={isSmartErasing}
             smartEraseStage={smartEraseStage}
             smartEraseError={smartEraseError}

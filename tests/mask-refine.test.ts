@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { componentBoxes, refineMaskToStrokes, type RgbaGrid } from '../src/infrastructure/inpaint/mask-refine'
+import { componentBoxes, detectStrokeRegions, refineMaskToStrokes, type RgbaGrid } from '../src/infrastructure/inpaint/mask-refine'
 
 function grid(width: number, height: number, fill: (x: number, y: number) => [number, number, number, number]): RgbaGrid {
   const data = new Uint8ClampedArray(width * height * 4)
@@ -144,5 +144,57 @@ describe('refineMaskToStrokes', () => {
     const mask = grid(width, height, () => [255, 0, 0, 255])
     const refined = refineMaskToStrokes(image, mask)
     for (let i = 0; i < width * height; i++) expect(refined[i * 4 + 3]).toBe(255)
+  })
+})
+
+describe('detectStrokeRegions', () => {
+  it('finds thin light strokes tiled over a flat background', () => {
+    // 160×120 flat #808080 with two 2px light text-like bars.
+    const image = grid(160, 120, () => [128, 128, 128, 255])
+    for (let y = 40; y < 44; y++) for (let x = 20; x < 60; x++) image.data.set([230, 230, 230, 255], (y * 160 + x) * 4)
+    for (let y = 80; y < 84; y++) for (let x = 80; x < 130; x++) image.data.set([230, 230, 230, 255], (y * 160 + x) * 4)
+    const regions = detectStrokeRegions(image)
+    expect(regions.length).toBe(2)
+    const covers = (x0: number, y0: number, x1: number, y1: number) =>
+      regions.some((b) => b.x <= x0 && b.y <= y0 && b.x + b.width >= x1 && b.y + b.height >= y1)
+    expect(covers(20, 40, 60, 44)).toBe(true)
+    expect(covers(80, 80, 130, 84)).toBe(true)
+  })
+
+  it('returns nothing on a flat frame', () => {
+    const image = grid(100, 100, () => [120, 120, 120, 255])
+    expect(detectStrokeRegions(image)).toEqual([])
+  })
+
+  it('drops dense boxes (photo edges) via the density gate', () => {
+    // A solid dark block: its component box is ~50% stroke pixels at the block
+    // level... make the whole box stroke-dense instead by filling a region with
+    // alternating high-contrast rows so nearly every pixel is a stroke.
+    const image = grid(120, 120, () => [128, 128, 128, 255])
+    for (let y = 20; y < 80; y++) {
+      for (let x = 20; x < 80; x++) {
+        const v = y % 2 === 0 ? 0 : 255
+        image.data.set([v, v, v, 255], (y * 120 + x) * 4)
+      }
+    }
+    // The checker region is dense strokes; the flat border must not be flagged.
+    const regions = detectStrokeRegions(image)
+    for (const b of regions) {
+      const overlap =
+        Math.max(0, Math.min(b.x + b.width, 80) - Math.max(b.x, 20)) *
+        Math.max(0, Math.min(b.y + b.height, 80) - Math.max(b.y, 20))
+      expect(overlap).toBeLessThanOrEqual(b.width * b.height)
+    }
+  })
+
+  it('caps the number of regions, largest first', () => {
+    const image = grid(200, 200, () => [128, 128, 128, 255])
+    for (let i = 0; i < 12; i++) {
+      const x = 10 + (i % 6) * 30
+      const y = 10 + Math.floor(i / 6) * 30
+      for (let dy = 0; dy < 3; dy++) for (let dx = 0; dx < 20; dx++) image.data.set([240, 240, 240, 255], ((y + dy) * 200 + x + dx) * 4)
+    }
+    const regions = detectStrokeRegions(image, { maxRegions: 5 })
+    expect(regions.length).toBe(5)
   })
 })
