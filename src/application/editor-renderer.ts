@@ -343,27 +343,47 @@ function traceTransformedRect(context: CanvasRenderingContext2D | OffscreenCanva
 // but are never baked into exports: the App strips 'erase-ai' layers before
 // rendering the snapshot it feeds to the inpainting worker.
 function drawEraseAiPreview(context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, layer: AnnotationLayer, state: EditorState, outputWidth: number, outputHeight: number, scale: number, showFullSource: boolean): void {
-  if (!layer.rect) return
   context.save()
   context.setLineDash([6 * scale, 4 * scale])
   context.lineWidth = Math.max(1.5, 2 * scale)
   context.strokeStyle = layer.color || '#34d399'
-  context.beginPath()
-  traceTransformedRect(context, layer.rect, state, outputWidth, outputHeight, scale, showFullSource)
-  context.stroke()
+  if (layer.points && layer.points.length > 0) {
+    traceErasePath(context, layer, state, outputWidth, outputHeight, scale, showFullSource, Math.max(1, (layer.strokeWidth || 24) * scale))
+    context.stroke()
+  } else if (layer.rect) {
+    context.beginPath()
+    traceTransformedRect(context, layer.rect, state, outputWidth, outputHeight, scale, showFullSource)
+    context.stroke()
+  }
   context.restore()
 }
 
 /**
  * Paints every pending smart-erase region as white-on-transparent so the caller
- * can turn it into the binary inpaint mask. Uses the same crop/rotate/flip
- * mapping as the annotation renderer, so the mask lines up with the marquee
- * the user positioned, at any output resolution.
+ * can turn it into the binary inpaint mask. Rectangles are filled; brush-shaped
+ * regions (a `points` stroke) are stroked at their own width. Uses the same
+ * crop/rotate/flip mapping as the annotation renderer, so the mask lines up
+ * with the marquee the user positioned, at any output resolution.
  */
 export function drawEraseAiMask(context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, state: EditorState, outputWidth: number, outputHeight: number, scale: number, showFullSource = false): void {
   const annotations = state.annotations ?? []
   for (const layer of annotations) {
-    if (layer.type !== 'erase-ai' || !layer.rect) continue
+    if (layer.type !== 'erase-ai') continue
+    if (layer.points && layer.points.length > 0) {
+      const lineWidth = Math.max(1, (layer.strokeWidth || 24) * scale)
+      context.save()
+      context.fillStyle = '#ffffff'
+      context.strokeStyle = '#ffffff'
+      context.lineCap = 'round'
+      context.lineJoin = 'round'
+      context.lineWidth = lineWidth
+      traceErasePath(context, layer, state, outputWidth, outputHeight, scale, showFullSource, lineWidth)
+      if (layer.points.length === 1) context.fill()
+      else context.stroke()
+      context.restore()
+      continue
+    }
+    if (!layer.rect) continue
     context.save()
     context.fillStyle = '#ffffff'
     context.beginPath()
@@ -371,6 +391,21 @@ export function drawEraseAiMask(context: CanvasRenderingContext2D | OffscreenCan
     context.fill()
     context.restore()
   }
+}
+
+// Traces a brush-shaped erase region into the current path (no fill/stroke).
+// A single point becomes a dot so a tap still masks something.
+function traceErasePath(context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, layer: AnnotationLayer, state: EditorState, outputWidth: number, outputHeight: number, scale: number, showFullSource: boolean, lineWidth: number): void {
+  const points = (layer.points ?? []).map((point) =>
+    transformPoint(point.x, point.y, state, outputWidth, outputHeight, scale, showFullSource)
+  )
+  context.beginPath()
+  if (points.length === 1) {
+    context.arc(points[0].x, points[0].y, lineWidth / 2, 0, Math.PI * 2)
+    return
+  }
+  context.moveTo(points[0].x, points[0].y)
+  for (let index = 1; index < points.length; index++) context.lineTo(points[index].x, points[index].y)
 }
 
 function drawSource(context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, source: DecodedSource, state: EditorState, outputWidth: number, outputHeight: number, scale: number, adjustments: Adjustments, showFullSource: boolean): void {

@@ -22,6 +22,15 @@ interface CanvasViewportProps {
   mosaicShape: MosaicShape
   /** Brush diameter in source pixels; ignored while mosaicShape is 'rect'. */
   mosaicBrushSize: number
+  /** Smart-erase mask shape: a box drawn by the toolbar, or a painted stroke. */
+  eraseMaskShape: MosaicShape
+  /** Painted smart-erase mask diameter in source pixels. */
+  eraseBrushSize: number
+  /**
+   * Whether a painted stroke may open an erase region. Off while the watermark
+   * tool shows the "add watermark" tab, so that tab's gestures stay inert.
+   */
+  eraseDrawingEnabled?: boolean
   textStyle: TextBgStyle
   textColor: string
   textSize: number
@@ -56,6 +65,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   mosaicBlockSize,
   mosaicShape,
   mosaicBrushSize,
+  eraseMaskShape,
+  eraseBrushSize,
+  eraseDrawingEnabled = true,
   textStyle,
   textColor,
   textSize,
@@ -75,7 +87,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const overlaySvgRef = useRef<SVGSVGElement>(null)
 
   interface DrawingStroke {
-    mode: MarkupMode | 'mosaic' | 'mosaic-brush'
+    mode: MarkupMode | 'mosaic' | 'mosaic-brush' | 'erase-brush'
     points: Array<{ x: number; y: number }>
     canvasPoints: Array<{ x: number; y: number }>
     rect?: Rect
@@ -284,6 +296,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
       currentStrokeRef.current = stroke
       setCurrentStroke(stroke)
+    } else if (activeTool === 'watermark' && eraseDrawingEnabled && eraseMaskShape === 'brush') {
+      const stroke: DrawingStroke = {
+        mode: 'erase-brush',
+        points: [sourcePt],
+        canvasPoints: [localPt],
+        rect: { x: sourcePt.x, y: sourcePt.y, width: 0, height: 0 },
+        canvasRect: { x: localPt.x, y: localPt.y, width: 0, height: 0 },
+      }
+      currentStrokeRef.current = stroke
+      setCurrentStroke(stroke)
     } else if (activeTool === 'text') {
       setActiveTextInput({
         x: sourcePt.x,
@@ -332,7 +354,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const localPt = getCanvasLocalCoord(e.clientX, e.clientY)
 
       const mode = currentStrokeRef.current.mode
-      if (mode === 'brush' || mode === 'highlighter' || mode === 'mosaic-brush') {
+      if (mode === 'brush' || mode === 'highlighter' || mode === 'mosaic-brush' || mode === 'erase-brush') {
         const lastPoint = currentStrokeRef.current.points[currentStrokeRef.current.points.length - 1]
         // Sub-pixel source moves cannot alter the rendered stroke; skipping
         // them avoids both state bloat and a re-render per pointer event.
@@ -479,6 +501,36 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             strokeWidth: mosaicBrushSize,
             mosaicType,
             mosaicBlockSize,
+          }
+        }
+      } else if (stroke.mode === 'erase-brush') {
+        if (stroke.points.length > 0) {
+          const half = eraseBrushSize / 2
+          let minX = Number.POSITIVE_INFINITY
+          let minY = Number.POSITIVE_INFINITY
+          let maxX = Number.NEGATIVE_INFINITY
+          let maxY = Number.NEGATIVE_INFINITY
+          for (const point of stroke.points) {
+            if (point.x < minX) minX = point.x
+            if (point.y < minY) minY = point.y
+            if (point.x > maxX) maxX = point.x
+            if (point.y > maxY) maxY = point.y
+          }
+          newLayer = {
+            id,
+            type: 'erase-ai',
+            // `points` marks a painted mask: only the stroke is inpainted, not
+            // the box around it. `rect` is kept as the stroke's bounding box so
+            // rect-only consumers still know where the region is.
+            points: stroke.points,
+            rect: {
+              x: minX - half,
+              y: minY - half,
+              width: maxX - minX + half * 2,
+              height: maxY - minY + half * 2,
+            },
+            color: '#34d399',
+            strokeWidth: eraseBrushSize,
           }
         }
       }
@@ -727,6 +779,35 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
                         strokeDasharray="4 4"
                       />
                     </>
+                  )}
+                </>
+              )
+            })()}
+            {currentStroke.mode === 'erase-brush' && (() => {
+              const brushWidth = Math.max(2, eraseBrushSize * overlayScale)
+              const pts = currentStroke.canvasPoints || currentStroke.points
+              const polylinePoints = pts.map((p) => `${p.x},${p.y}`).join(' ')
+              return (
+                <>
+                  {pts.length === 1 ? (
+                    <circle
+                      cx={pts[0].x}
+                      cy={pts[0].y}
+                      r={brushWidth / 2}
+                      fill="rgba(52, 211, 153, 0.20)"
+                      stroke="#34d399"
+                      strokeWidth={1.5}
+                      strokeDasharray="4 4"
+                    />
+                  ) : (
+                    <polyline
+                      points={polylinePoints}
+                      fill="none"
+                      stroke="rgba(52, 211, 153, 0.20)"
+                      strokeWidth={brushWidth}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   )}
                 </>
               )

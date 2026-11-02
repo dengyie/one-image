@@ -5,6 +5,7 @@
 // result, even if a caller overlaps them.
 
 import type { SmartEraseRequest, SmartEraseResponse } from './inpaint-worker'
+import type { FillProvider } from './auto-route'
 
 export const SMART_ERASE_MAX_EDGE = 6144
 
@@ -15,6 +16,8 @@ export interface SmartEraseInput {
   mask: ImageData
   /** Feathered alpha mask used only for blending the result back in. */
   composite: ImageData
+  /** Which filler the caller routed this hole to. Defaults to MI-GAN. */
+  provider?: FillProvider
 }
 
 export type SmartEraseStage =
@@ -110,6 +113,7 @@ export function runSmartErase(
         runId,
         width,
         height,
+        provider: input.provider ?? 'migan',
         image: input.image.data.buffer,
         mask: input.mask.data.buffer,
         composite: input.composite.data.buffer,

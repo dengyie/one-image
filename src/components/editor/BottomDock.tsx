@@ -6,8 +6,9 @@ import { MosaicSubToolbar, type MosaicType, type MosaicShape } from './SubToolba
 import { TextSubToolbar } from './SubToolbars/TextSubToolbar'
 import { AdjustSubToolbar } from './SubToolbars/AdjustSubToolbar'
 import { CompressSubToolbar } from './SubToolbars/CompressSubToolbar'
-import { WatermarkSubToolbar, type WatermarkLayout, type WatermarkEraseType } from './SubToolbars/WatermarkSubToolbar'
+import { WatermarkSubToolbar, type WatermarkLayout, type WatermarkEraseType, type WatermarkTab } from './SubToolbars/WatermarkSubToolbar'
 import type { SmartEraseStage } from '../../infrastructure/inpaint/smart-erase'
+import type { SmartEraseMode } from '../../infrastructure/inpaint/auto-route'
 import type { Adjustments, TextBgStyle } from '../../domain/editor-state'
 import type { ProvenanceResult } from '../../infrastructure/openai-provenance-adapter'
 
@@ -68,6 +69,14 @@ interface BottomDockProps {
   isSmartErasing?: boolean
   smartEraseStage?: SmartEraseStage | null
   smartEraseError?: string | null
+  eraseMaskShape: MosaicShape
+  eraseBrushSize: number
+  eraseMode: SmartEraseMode
+  onEraseMaskShapeSelect: (shape: MosaicShape) => void
+  onEraseBrushSizeSelect: (size: number) => void
+  onEraseModeSelect: (mode: SmartEraseMode) => void
+  onClearEraseRegions: () => void
+  onWatermarkTabChange?: (tab: WatermarkTab) => void
 
   // Compress props
   outputMime: string
@@ -136,6 +145,14 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   isSmartErasing,
   smartEraseStage,
   smartEraseError,
+  eraseMaskShape,
+  eraseBrushSize,
+  eraseMode,
+  onEraseMaskShapeSelect,
+  onEraseBrushSizeSelect,
+  onEraseModeSelect,
+  onClearEraseRegions,
+  onWatermarkTabChange,
   outputMime,
   quality,
   estimatedBytes,
@@ -215,6 +232,14 @@ export const BottomDock: React.FC<BottomDockProps> = ({
             isSmartErasing={isSmartErasing}
             smartEraseStage={smartEraseStage}
             smartEraseError={smartEraseError}
+            eraseMaskShape={eraseMaskShape}
+            eraseBrushSize={eraseBrushSize}
+            eraseMode={eraseMode}
+            onEraseMaskShapeSelect={onEraseMaskShapeSelect}
+            onEraseBrushSizeSelect={onEraseBrushSizeSelect}
+            onEraseModeSelect={onEraseModeSelect}
+            onClearEraseRegions={onClearEraseRegions}
+            onTabChange={onWatermarkTabChange}
           />
         )}
         {activeTool === 'compress' && (

@@ -11,6 +11,7 @@ import {
   DEFAULT_ADJUSTMENTS,
   aspectRatioId,
   createEditorState,
+  editorStatesEqual,
   normalizeAspectRatio,
   rotateEditorState,
 } from './domain/editor-state'
@@ -63,9 +64,11 @@ import {
 } from './infrastructure/history-storage'
 import type { MarkupMode } from './components/editor/SubToolbars/MarkupSubToolbar'
 import type { MosaicType, MosaicShape } from './components/editor/SubToolbars/MosaicSubToolbar'
-import type { WatermarkLayout, WatermarkEraseType } from './components/editor/SubToolbars/WatermarkSubToolbar'
+import type { WatermarkLayout, WatermarkEraseType, WatermarkTab } from './components/editor/SubToolbars/WatermarkSubToolbar'
 import { runSmartErase, disposeSmartEraseWorker, SMART_ERASE_MAX_EDGE, type SmartEraseStage } from './infrastructure/inpaint/smart-erase'
 import { drawEraseAiMask } from './application/editor-renderer'
+import { refineMaskToStrokes } from './infrastructure/inpaint/mask-refine'
+import { routeFill, type SmartEraseMode } from './infrastructure/inpaint/auto-route'
 import { computeFitScale, clampZoom, isNearActualSize, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
@@ -147,6 +150,15 @@ export function App() {
   // box is still one click away in the sub-toolbar.
   const [mosaicShape, setMosaicShape] = useState<MosaicShape>('brush')
   const [mosaicBrushSize, setMosaicBrushSize] = useState(48)
+  // Smart-erase mask: painted strokes by default so only the watermark pixels
+  // become the hole; a box is still available. 'auto' routes small holes to the
+  // local diffusion filler and larger ones to MI-GAN.
+  const [eraseMaskShape, setEraseMaskShape] = useState<MosaicShape>('brush')
+  const [eraseBrushSize, setEraseBrushSize] = useState(32)
+  const [eraseMode, setEraseMode] = useState<SmartEraseMode>('auto')
+  // Which sub-tab the watermark tool shows. Painting a mask is only meaningful
+  // on the 'erase' tab; on 'add' the same gesture must not mint erase regions.
+  const [watermarkTab, setWatermarkTab] = useState<WatermarkTab>('add')
   const [textStyle, setTextStyle] = useState<TextBgStyle>('translucent')
   const [textColor, setTextColor] = useState('#ffffff')
   const [textSize, setTextSize] = useState(28)
@@ -565,10 +577,20 @@ export function App() {
       if (!decodedSource || !currentState || !file) {
         throw new Error('未加载图片')
       }
-      const blob = await exportEditor(decodedSource, currentState, factory, mime, q / 100)
       const baseName = file.name.replace(/\.[^/.]+$/, '')
       const ext = mime === 'image/webp' ? 'webp' : mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : 'avif'
       const filename = `${baseName}_edited.${ext}`
+
+      // Nothing was edited and the requested container matches the source: the
+      // only truly "image unchanged" export is the original bytes, so hand them
+      // back untouched instead of round-tripping through a canvas (which would
+      // re-encode, drop the ICC profile, and shift wide-gamut colours).
+      const pristine = editorStatesEqual(createEditorState(decodedSource.width, decodedSource.height), currentState)
+      if (pristine && file.type === mime) {
+        return { blob: file, filename: `${baseName}_original.${ext}` }
+      }
+
+      const blob = await exportEditor(decodedSource, currentState, factory, mime, q / 100)
       return { blob, filename }
     },
     [decodedSource, currentState, file, factory]
@@ -771,6 +793,15 @@ export function App() {
     [commitEdit, showToast]
   )
 
+  const handleClearEraseRegions = useCallback(() => {
+    const state = sessionState(sessionRef.current)
+    if (!state) return
+    commitEdit((prev) => ({
+      ...prev,
+      annotations: (prev.annotations ?? []).filter((layer) => layer.type !== 'erase-ai'),
+    }))
+  }, [commitEdit])
+
   // Smart erase: bake the current state at full resolution, run browser-local
   // MI-GAN under the pending marquee regions, and open the result as a new
   // document. Pixels outside the mask are preserved bit-for-bit by the
@@ -817,22 +848,56 @@ export function App() {
       drawEraseAiMask(maskCtx, state, width, height, 1)
       const maskData = maskCtx.getImageData(0, 0, width, height)
 
-      // Composite alpha: the same regions blurred twice so the interior stays
-      // fully generated while edges feather into untouched pixels. Where the
-      // platform lacks canvas filters this degrades to a crisp edge.
+      // Tighten whatever the user drew down to the overlay strokes it actually
+      // covers. A box around a watermark otherwise hands the filler a large
+      // rectangle of clean background to re-synthesize — the exact reason the
+      // result looked "changed". Falls back to the drawn mask when no stroke is
+      // distinguishable, so this can only ever shrink towards the watermark.
+      const refined = refineMaskToStrokes(
+        { data: imageData.data, width, height },
+        { data: maskData.data, width, height }
+      )
+      maskData.data.set(refined)
+
+      // Route the hole to a filler: small holes to local diffusion (no model,
+      // no resampling), larger ones to MI-GAN.
+      const decision = routeFill({
+        mode: eraseMode,
+        mask: { data: refined, width, height },
+        imageWidth: width,
+        imageHeight: height,
+      })
+
+      // Composite alpha: the refined mask blurred twice so the interior stays
+      // fully generated while edges feather into untouched pixels. It is built
+      // from the same refined mask the filler sees, so the blend window can
+      // never be wider than the hole.
+      const refineCanvas = makeCanvas()
+      ctxOf(refineCanvas).putImageData(maskData, 0, 0)
       const alphaCanvas = makeCanvas()
       const alphaCtx = ctxOf(alphaCanvas)
       alphaCtx.fillStyle = '#000000'
       alphaCtx.fillRect(0, 0, width, height)
       alphaCtx.filter = 'blur(3px)'
-      drawEraseAiMask(alphaCtx, state, width, height, 1)
-      drawEraseAiMask(alphaCtx, state, width, height, 1)
+      alphaCtx.drawImage(refineCanvas as unknown as CanvasImageSource, 0, 0)
+      alphaCtx.drawImage(refineCanvas as unknown as CanvasImageSource, 0, 0)
       const alphaData = alphaCtx.getImageData(0, 0, width, height)
 
-      const result = await runSmartErase(
-        { image: imageData, mask: maskData, composite: alphaData },
-        setSmartEraseStage
-      )
+      let result: ImageData
+      try {
+        result = await runSmartErase(
+          { image: imageData, mask: maskData, composite: alphaData, provider: decision.provider },
+          setSmartEraseStage
+        )
+      } catch (err) {
+        // The classical filler refuses pathologically large working sets; fall
+        // back to the model rather than failing the whole edit.
+        if (decision.provider !== 'classical') throw err
+        result = await runSmartErase(
+          { image: imageData, mask: maskData, composite: alphaData, provider: 'migan' },
+          setSmartEraseStage
+        )
+      }
 
       const outCanvas = makeCanvas()
       ctxOf(outCanvas).putImageData(result, 0, 0)
@@ -861,7 +926,8 @@ export function App() {
         state: createEditorState(decoded.width, decoded.height),
       }))
       if (opened) {
-        showToast(`智能修复完成：${aiLayers.length} 个区域已合成，掩膜外像素未改动`, 'success')
+        const engine = decision.provider === 'classical' ? '本地扩散' : 'MI-GAN 合成'
+        showToast(`智能修复完成（${engine}）：${aiLayers.length} 个区域，掩膜外像素未改动`, 'success')
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -871,7 +937,7 @@ export function App() {
       setIsSmartErasing(false)
       setSmartEraseStage(null)
     }
-  }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit])
+  }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode])
 
   const handleCheckProvenanceTarget = useCallback(
     async (target: 'current' | 'original') => {
@@ -1279,6 +1345,9 @@ export function App() {
               onCommitDraft={handleCommitDraft}
               onCancelDraft={handleCancelDraft}
               onAddAnnotation={addAnnotation}
+              eraseMaskShape={eraseMaskShape}
+              eraseBrushSize={eraseBrushSize}
+              eraseDrawingEnabled={activeTool === 'watermark' && watermarkTab === 'erase'}
             />
           </main>
 
@@ -1324,6 +1393,14 @@ export function App() {
             isSmartErasing={isSmartErasing}
             smartEraseStage={smartEraseStage}
             smartEraseError={smartEraseError}
+            eraseMaskShape={eraseMaskShape}
+            eraseBrushSize={eraseBrushSize}
+            eraseMode={eraseMode}
+            onEraseMaskShapeSelect={setEraseMaskShape}
+            onEraseBrushSizeSelect={setEraseBrushSize}
+            onEraseModeSelect={setEraseMode}
+            onClearEraseRegions={handleClearEraseRegions}
+            onWatermarkTabChange={setWatermarkTab}
             provenanceResultDetail={provenanceResultDetail}
             provenanceError={provenanceError}
             outputMime={outputMime}
