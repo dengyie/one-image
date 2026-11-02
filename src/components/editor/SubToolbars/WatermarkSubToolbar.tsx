@@ -2,12 +2,13 @@ import React, { useState } from 'react'
 import { UiIcon } from '../../ui/UiIcon'
 import type { ProvenanceResult } from '../../../infrastructure/openai-provenance-adapter'
 import type { SmartEraseStage } from '../../../infrastructure/inpaint/smart-erase'
-import type { SmartEraseMode } from '../../../infrastructure/inpaint/auto-route'
+import type { SmartEraseMode, EraseKind } from '../../../infrastructure/inpaint/auto-route'
 import type { MosaicShape } from './MosaicSubToolbar'
 
 export type WatermarkTab = 'add' | 'erase' | 'test'
 export type WatermarkLayout = 'tile' | 'corner'
-export type WatermarkEraseType = 'blur' | 'pixel' | 'blackout' | 'ai'
+/** The toolbar's erase kinds, resolved onto fillers by `resolveEraseProvider`. */
+export type WatermarkEraseType = EraseKind
 
 export interface WatermarkSubToolbarProps {
   onAddWatermark: (options: { text: string; layout: WatermarkLayout; opacity: number; color: string }) => void

@@ -16,7 +16,10 @@ import type { RgbaGrid } from './mask-refine'
 import { holeBounds, type HoleBounds } from './classical-fill'
 
 export interface ObscureFillOptions {
-  /** Refuse to build a working set larger than this (memory guard, blur only). */
+  /**
+   * Per-strip working budget in pixels (blur only). Each strip's float buffers
+   * stay under this bound regardless of the selection's size.
+   */
   maxWorkingPixels?: number
 }
 
@@ -56,6 +59,12 @@ export function deriveObscureParams(bounds: HoleBounds): { blurRadius: number; p
  * over the whole working crop (hole and background alike) so stroke colors melt
  * into the surrounding image exactly like an optical blur would; the compositor
  * decides how much of it is visible.
+ *
+ * The crop is processed in row strips: each strip carries a halo of 3σ rows —
+ * the total vertical support of three box passes — so every strip's core rows
+ * compute bit-identically to a whole-crop run while memory stays bounded for
+ * selections of any size (a flat region with no detectable strokes can hand
+ * this filler the user's whole selection).
  */
 export function fillHolesBlur(image: RgbaGrid, holeMask: RgbaGrid, options: BlurFillOptions = {}): Uint8ClampedArray {
   const { width, height } = image
@@ -73,32 +82,45 @@ export function fillHolesBlur(image: RgbaGrid, holeMask: RgbaGrid, options: Blur
   const x1 = Math.min(width - 1, bounds.x + bounds.width - 1 + pad)
   const y1 = Math.min(height - 1, bounds.y + bounds.height - 1 + pad)
   const subW = x1 - x0 + 1
-  const subH = y1 - y0 + 1
-  const maxPixels = options.maxWorkingPixels ?? DEFAULT_MAX_WORKING_PIXELS
-  if (subW * subH > maxPixels) {
+
+  // Each strip's buffer (core rows plus the 3σ halo on both sides) must fit
+  // the budget, so the guard rejects only widths no strip shape can satisfy.
+  const halo = 3 * sigma
+  const stripRows = Math.floor((options.maxWorkingPixels ?? DEFAULT_MAX_WORKING_PIXELS) / subW)
+  if (stripRows < 1 + 2 * halo) {
     throw new Error('fillHolesBlur: hole region too large for the blur filler')
   }
+  const coreRows = stripRows - 2 * halo
 
-  // Extract the crop as planar float RGB. Edge handling is clamp-to-edge, so
-  // holes touching the image border blur inward instead of reading undefined.
-  const plane = new Float32Array(subW * subH * 3)
-  for (let y = 0; y < subH; y++) {
-    for (let x = 0; x < subW; x++) {
-      const o = ((y0 + y) * width + (x0 + x)) * 4
-      const i = (y * subW + x) * 3
-      plane[i] = image.data[o]
-      plane[i + 1] = image.data[o + 1]
-      plane[i + 2] = image.data[o + 2]
+  for (let coreTop = y0; coreTop <= y1; coreTop += coreRows) {
+    const coreBottom = Math.min(y1, coreTop + coreRows - 1)
+    const top = Math.max(y0, coreTop - halo)
+    const bottom = Math.min(y1, coreBottom + halo)
+    const rows = bottom - top + 1
+    // Extract the strip as planar float RGB. Edge handling is clamp-to-edge at
+    // both the image border and the crop border, so holes touching either blur
+    // inward instead of reading undefined, and core rows near a clamped strip
+    // edge clamp exactly where a whole-crop run would.
+    const plane = new Float32Array(subW * rows * 3)
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < subW; x++) {
+        const o = ((top + y) * width + (x0 + x)) * 4
+        const i = (y * subW + x) * 3
+        plane[i] = image.data[o]
+        plane[i + 1] = image.data[o + 1]
+        plane[i + 2] = image.data[o + 2]
+      }
     }
-  }
-  boxBlurPlane(plane, subW, subH, sigma, 3)
-  for (let y = 0; y < subH; y++) {
-    for (let x = 0; x < subW; x++) {
-      const o = ((y0 + y) * width + (x0 + x)) * 4
-      const i = (y * subW + x) * 3
-      out[o] = clampByte(plane[i])
-      out[o + 1] = clampByte(plane[i + 1])
-      out[o + 2] = clampByte(plane[i + 2])
+    boxBlurPlane(plane, subW, rows, sigma, 3)
+    for (let y = coreTop; y <= coreBottom; y++) {
+      const src = (y - top) * subW
+      for (let x = 0; x < subW; x++) {
+        const o = (y * width + (x0 + x)) * 4
+        const i = (src + x) * 3
+        out[o] = clampByte(plane[i])
+        out[o + 1] = clampByte(plane[i + 1])
+        out[o + 2] = clampByte(plane[i + 2])
+      }
     }
   }
   return out

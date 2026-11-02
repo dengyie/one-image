@@ -215,3 +215,74 @@ describe('obscure fills through the compositor', () => {
     }
   })
 })
+
+describe('fillHolesBlur strip processing', () => {
+  const pattern = (x: number, y: number): [number, number, number] => [
+    (x * 13 + y * 7) % 256,
+    (x * 3 + y * 29) % 256,
+    (x ^ y) & 255,
+  ]
+
+  it('is bit-identical whether the crop runs in one strip or many', () => {
+    const image = makeImage(80, 60, pattern)
+    const mask = maskWithRect(80, 60, { x: 20, y: 15, w: 40, h: 30 })
+    // Crop = 72×60 rows; radius 4 → halo 12. Budget 72×30 → 30-row strips with
+    // 6 core rows each, i.e. ten strips against one whole-crop strip.
+    const whole = fillHolesBlur(image, mask, { radius: 4 })
+    const striped = fillHolesBlur(image, mask, { radius: 4, maxWorkingPixels: 72 * 30 })
+    expect(Array.from(striped)).toEqual(Array.from(whole))
+  })
+
+  it('keeps the exact strip-shape boundary working and rejects only unsatisfiable widths', () => {
+    const image = makeImage(80, 60, pattern)
+    const mask = maskWithRect(80, 60, { x: 20, y: 15, w: 40, h: 30 })
+    const whole = fillHolesBlur(image, mask, { radius: 4 })
+    // 72×25 rows is exactly one core row per strip (25 = 1 + 2×12 halo).
+    const tight = fillHolesBlur(image, mask, { radius: 4, maxWorkingPixels: 72 * 25 })
+    expect(Array.from(tight)).toEqual(Array.from(whole))
+    expect(() => fillHolesBlur(image, mask, { radius: 4, maxWorkingPixels: 72 * 25 - 1 })).toThrow(/too large/)
+  })
+
+  it('no longer throws for selections whose whole crop exceeds the budget', () => {
+    const image = makeImage(300, 300, pattern)
+    const mask = maskWithRect(300, 300, { x: 0, y: 0, w: 300, h: 300 })
+    // Whole crop 324×324 ≈ 105k px; a 30k budget forces many strips.
+    const out = fillHolesBlur(image, mask, { radius: 4, maxWorkingPixels: 30_000 })
+    const whole = fillHolesBlur(image, mask, { radius: 4 })
+    expect(Array.from(out)).toEqual(Array.from(whole))
+  })
+
+  it('blurs a mask anchored at the image corner with clamp-to-edge', () => {
+    const flat = makeImage(60, 60, () => [90, 90, 90])
+    const mask = maskWithRect(60, 60, { x: 0, y: 0, w: 12, h: 12 })
+    // Any out-of-bounds read would break the constant image.
+    const out = fillHolesBlur(flat, mask, { radius: 3 })
+    expect(Array.from(out)).toEqual(Array.from(flat.data))
+    const varied = makeImage(60, 60, pattern)
+    expect(() => fillHolesBlur(varied, mask, { radius: 3 })).not.toThrow()
+  })
+})
+
+describe('fillHolesPixelate block clamping', () => {
+  it('clamps edge blocks when the grid does not divide the image', () => {
+    const image = makeImage(30, 30, (x, y) => [(x * 8) % 256, (y * 4) % 256, 3])
+    const mask = maskWithRect(30, 30, { x: 24, y: 24, w: 6, h: 6 })
+    const out = fillHolesPixelate(image, mask, { block: 4 })
+    const at = (x: number, y: number) => (y * 30 + x) * 4
+    // The block holding (29,29) is clamped to x 28..29, y 28..29.
+    let r = 0
+    let g = 0
+    let b = 0
+    for (let y = 28; y < 30; y++) {
+      for (let x = 28; x < 30; x++) {
+        const o = at(x, y)
+        r += image.data[o]
+        g += image.data[o + 1]
+        b += image.data[o + 2]
+      }
+    }
+    expect(Math.abs(out[at(29, 29)] - r / 4)).toBeLessThanOrEqual(0.51)
+    expect(Math.abs(out[at(29, 29) + 1] - g / 4)).toBeLessThanOrEqual(0.51)
+    expect(Math.abs(out[at(29, 29) + 2] - b / 4)).toBeLessThanOrEqual(0.51)
+  })
+})

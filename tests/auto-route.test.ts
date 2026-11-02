@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AUTO_CLASSICAL_MAX_COVERAGE,
   AUTO_CLASSICAL_MAX_PIXELS,
+  resolveEraseProvider,
   routeFill,
 } from '../src/infrastructure/inpaint/auto-route'
 import type { RgbaGrid } from '../src/infrastructure/inpaint/mask-refine'
@@ -65,5 +66,13 @@ describe('routeFill', () => {
     const decision = routeFill({ mode: 'auto', mask: mask(0, 0, 0), imageWidth: 0, imageHeight: 0 })
     expect(decision.coverage).toBe(0)
     expect(decision.provider).toBe('classical')
+  })
+})
+
+describe('resolveEraseProvider', () => {
+  it('maps blackout to solid and passes blur/pixel through verbatim', () => {
+    expect(resolveEraseProvider('blackout')).toBe('solid')
+    expect(resolveEraseProvider('blur')).toBe('blur')
+    expect(resolveEraseProvider('pixel')).toBe('pixel')
   })
 })

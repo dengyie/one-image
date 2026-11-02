@@ -73,3 +73,15 @@ export function routeFill(input: RouteInput): RouteDecision {
     reason: `选区较大（${holePixels}px），使用 MI-GAN 合成填充`,
   }
 }
+
+/** What the erase tab's 消除方式 pills select. Lives beside the routing types
+ * because the run handler resolves it onto a FillProvider. */
+export type EraseKind = 'blur' | 'pixel' | 'blackout' | 'ai'
+
+/** Maps the non-AI erase kinds onto their fillers. Blur and pixelate are
+ * fillers in their own right; solid blackout is the guaranteed-cover filler
+ * that keeps the drawn region untouched by refinement. The AI kind is resolved
+ * by `routeFill` at the call site. */
+export function resolveEraseProvider(kind: Exclude<EraseKind, 'ai'>): FillProvider {
+  return kind === 'blackout' ? 'solid' : kind
+}

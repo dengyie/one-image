@@ -65,11 +65,11 @@ import {
 import type { MarkupMode } from './components/editor/SubToolbars/MarkupSubToolbar'
 import type { MosaicType, MosaicShape } from './components/editor/SubToolbars/MosaicSubToolbar'
 import type { WatermarkLayout, WatermarkEraseType, WatermarkTab } from './components/editor/SubToolbars/WatermarkSubToolbar'
-import { runSmartErase, disposeSmartEraseWorker, SMART_ERASE_MAX_EDGE, type SmartEraseStage } from './infrastructure/inpaint/smart-erase'
+import { runSmartErase, SMART_ERASE_MAX_EDGE, type SmartEraseStage } from './infrastructure/inpaint/smart-erase'
 import { drawEraseAiMask } from './application/editor-renderer'
 import { refineMaskToStrokes } from './infrastructure/inpaint/mask-refine'
 import { countHolePixels } from './infrastructure/inpaint/classical-fill'
-import { routeFill, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
+import { routeFill, resolveEraseProvider, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
 import { computeFitScale, clampZoom, isNearActualSize, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
@@ -858,9 +858,7 @@ export function App() {
       const provider: FillProvider =
         eraseType === 'ai'
           ? routeFill({ mode: eraseMode, mask: maskGrid, imageWidth: width, imageHeight: height }).provider
-          : eraseType === 'blackout'
-          ? 'solid'
-          : eraseType
+          : resolveEraseProvider(eraseType)
 
       // Composite alpha: the working mask blurred twice so the interior stays
       // fully covered while edges feather into untouched pixels. It is built
@@ -885,10 +883,19 @@ export function App() {
         )
       } catch (err) {
         // The classical filler refuses pathologically large working sets; fall
-        // back to the model rather than failing the whole edit.
+        // back to the model rather than failing the whole edit. The failed run
+        // transferred the caller's buffers away (they are detached now), so the
+        // retry re-reads the very planes it received from the canvases that
+        // produced them: imageCanvas holds the snapshot, refineCanvas the
+        // tightened mask, alphaCanvas the feathered alpha.
         if (provider !== 'classical') throw err
         result = await runSmartErase(
-          { image: imageData, mask: maskData, composite: alphaData, provider: 'migan' },
+          {
+            image: ctxOf(imageCanvas).getImageData(0, 0, width, height),
+            mask: ctxOf(refineCanvas).getImageData(0, 0, width, height),
+            composite: ctxOf(alphaCanvas).getImageData(0, 0, width, height),
+            provider: 'migan',
+          },
           setSmartEraseStage
         )
       }
