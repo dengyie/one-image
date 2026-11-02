@@ -20,6 +20,7 @@ export interface WatermarkSubToolbarProps {
   /** Present when the current state has pending smart-erase regions. */
   hasEraseAiRegions?: boolean
   onRunErase?: (eraseType: WatermarkEraseType) => void
+  onCleanAllWatermarks?: () => void
   isSmartErasing?: boolean
   smartEraseStage?: SmartEraseStage | null
   smartEraseError?: string | null
@@ -78,6 +79,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
   provenanceError,
   hasEraseAiRegions = false,
   onRunErase,
+  onCleanAllWatermarks,
   isSmartErasing = false,
   smartEraseStage,
   smartEraseError,
@@ -392,6 +394,26 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
               <span>清除全部消除选区</span>
             </button>
           )}
+
+          <button
+            type="button"
+            disabled={isSmartErasing}
+            onClick={() => onCleanAllWatermarks?.()}
+            title="全图扫描疑似水印笔画并自动智能清理；结果在新文档打开，原图不动，可撤销/还原"
+            className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-700 disabled:text-zinc-500 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
+          >
+            {isSmartErasing ? (
+              <>
+                <span className="animate-spin"><UiIcon name="loader" size={13} /></span>
+                <span>正在扫描全图…</span>
+              </>
+            ) : (
+              <>
+                <UiIcon name="sparkles" size={13} />
+                <span>一键清理全图水印</span>
+              </>
+            )}
+          </button>
 
           {smartEraseError && (
             <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-900/60 p-2 rounded-lg font-mono">

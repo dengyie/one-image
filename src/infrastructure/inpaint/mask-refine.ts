@@ -58,11 +58,7 @@ export function refineMaskToStrokes(
   const dilate = Math.max(0, Math.round(options.dilate ?? DEFAULTS.dilate))
   const minComponentPixels = Math.max(1, Math.round(options.minComponentPixels ?? DEFAULTS.minComponentPixels))
 
-  const gray = new Float32Array(size)
-  for (let i = 0; i < size; i++) {
-    const o = i * 4
-    gray[i] = 0.299 * image.data[o] + 0.587 * image.data[o + 1] + 0.114 * image.data[o + 2]
-  }
+  const gray = toGray(image)
   const background = boxBlur(gray, width, height, radius)
 
   const inMask = new Uint8Array(size)
@@ -155,6 +151,85 @@ function copyMask(mask: RgbaGrid): Uint8ClampedArray {
   const out = new Uint8ClampedArray(mask.data.length)
   out.set(mask.data)
   return out
+}
+
+function toGray(image: RgbaGrid): Float32Array {
+  const size = image.width * image.height
+  const gray = new Float32Array(size)
+  for (let i = 0; i < size; i++) {
+    const o = i * 4
+    gray[i] = 0.299 * image.data[o] + 0.587 * image.data[o + 1] + 0.114 * image.data[o + 2]
+  }
+  return gray
+}
+
+export interface DetectStrokeOptions {
+  /** Local-contrast floor (0-255) for a pixel to count as a stroke. */
+  threshold?: number
+  /** Background-estimate radius in pixels. */
+  radius?: number
+  /** Grow every accepted box by this many pixels to cover anti-aliasing. */
+  dilate?: number
+  /** Components smaller than this many pixels are noise. */
+  minComponentPixels?: number
+  /**
+   * Boxes whose stroke pixels exceed this share are photo content (an edge or
+   * texture fills its box), not a sparse overlay; they are dropped.
+   */
+  maxDensity?: number
+  /** Hard cap on returned boxes, largest first. */
+  maxRegions?: number
+}
+
+/**
+ * Whole-image stroke scan for the one-click watermark cleanup: finds the
+ * bounding boxes of high-local-contrast components anywhere in the frame, with
+ * two guards against destroying ordinary photos. The density gate drops boxes
+ * that are mostly stroke (photo edges and textures are dense; watermark glyphs
+ * are thin strokes on background), and the region cap bounds how much a single
+ * mistaken run can touch. Callers additionally gate on total coverage before
+ * filling. Conservative defaults: a higher threshold and a larger minimum
+ * component than the in-mask refiner, because there is no user mask to lean on.
+ */
+export function detectStrokeRegions(image: RgbaGrid, options: DetectStrokeOptions = {}): PixelBox[] {
+  const { width, height } = image
+  const threshold = options.threshold ?? 20
+  // A broad background estimate matters more here than in the in-mask refiner:
+  // with a tight radius a high-contrast stroke raises its own background enough
+  // to flag the rows around it as strokes too, inflating every component box
+  // until the density gate rejects the real watermark.
+  const radius = Math.max(1, Math.round(options.radius ?? 12))
+  const dilate = Math.max(0, Math.round(options.dilate ?? 2))
+  const minComponentPixels = Math.max(1, Math.round(options.minComponentPixels ?? 24))
+  const maxDensity = Math.min(1, Math.max(0, options.maxDensity ?? 0.6))
+  const maxRegions = Math.max(1, Math.round(options.maxRegions ?? 300))
+
+  const gray = toGray(image)
+  const background = boxBlur(gray, width, height, radius)
+  const stroke = new Uint8Array(width * height)
+  for (let i = 0; i < width * height; i++) {
+    if (Math.abs(gray[i] - background[i]) >= threshold) stroke[i] = 1
+  }
+
+  const accepted: PixelBox[] = []
+  for (const raw of componentBoxes(stroke, width, height, minComponentPixels)) {
+    const x0 = Math.max(0, raw.x - dilate)
+    const y0 = Math.max(0, raw.y - dilate)
+    const x1 = Math.min(width - 1, raw.x + raw.width - 1 + dilate)
+    const y1 = Math.min(height - 1, raw.y + raw.height - 1 + dilate)
+    let strokePixels = 0
+    let total = 0
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        total++
+        if (stroke[y * width + x]) strokePixels++
+      }
+    }
+    if (strokePixels / total > maxDensity) continue
+    accepted.push({ x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 })
+  }
+  accepted.sort((a, b) => b.width * b.height - a.width * a.height)
+  return accepted.slice(0, maxRegions)
 }
 
 /** Separable box blur via a summed-area table; radius is inclusive. */

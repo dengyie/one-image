@@ -87,7 +87,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const overlaySvgRef = useRef<SVGSVGElement>(null)
 
   interface DrawingStroke {
-    mode: MarkupMode | 'mosaic' | 'mosaic-brush' | 'erase-brush'
+    mode: MarkupMode | 'mosaic' | 'mosaic-brush' | 'erase-brush' | 'erase-rect'
     points: Array<{ x: number; y: number }>
     canvasPoints: Array<{ x: number; y: number }>
     rect?: Rect
@@ -299,6 +299,19 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     } else if (activeTool === 'watermark' && eraseDrawingEnabled && eraseMaskShape === 'brush') {
       const stroke: DrawingStroke = {
         mode: 'erase-brush',
+        points: [sourcePt],
+        canvasPoints: [localPt],
+        rect: { x: sourcePt.x, y: sourcePt.y, width: 0, height: 0 },
+        canvasRect: { x: localPt.x, y: localPt.y, width: 0, height: 0 },
+      }
+      currentStrokeRef.current = stroke
+      setCurrentStroke(stroke)
+    } else if (activeTool === 'watermark' && eraseDrawingEnabled && eraseMaskShape === 'rect') {
+      // Drag-to-draw the erase box. Before this branch the gesture fell through
+      // every case and did nothing, so box mode could only place the toolbar's
+      // centered template and never a box where the watermark actually is.
+      const stroke: DrawingStroke = {
+        mode: 'erase-rect',
         points: [sourcePt],
         canvasPoints: [localPt],
         rect: { x: sourcePt.x, y: sourcePt.y, width: 0, height: 0 },
@@ -531,6 +544,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             },
             color: '#34d399',
             strokeWidth: eraseBrushSize,
+          }
+        }
+      } else if (stroke.mode === 'erase-rect') {
+        if (stroke.rect && stroke.rect.width > 4 && stroke.rect.height > 4) {
+          newLayer = {
+            id,
+            type: 'erase-ai',
+            rect: stroke.rect,
+            color: '#34d399',
+            strokeWidth: 0,
           }
         }
       }
@@ -820,6 +843,18 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
                 height={(currentStroke.canvasRect || currentStroke.rect)!.height}
                 fill="rgba(255, 255, 255, 0.2)"
                 stroke="#22c55e"
+                strokeWidth={1.5}
+                strokeDasharray="4 4"
+              />
+            )}
+            {currentStroke.mode === 'erase-rect' && (currentStroke.canvasRect || currentStroke.rect) && (
+              <rect
+                x={(currentStroke.canvasRect || currentStroke.rect)!.x}
+                y={(currentStroke.canvasRect || currentStroke.rect)!.y}
+                width={(currentStroke.canvasRect || currentStroke.rect)!.width}
+                height={(currentStroke.canvasRect || currentStroke.rect)!.height}
+                fill="rgba(52, 211, 153, 0.12)"
+                stroke="#34d399"
                 strokeWidth={1.5}
                 strokeDasharray="4 4"
               />
