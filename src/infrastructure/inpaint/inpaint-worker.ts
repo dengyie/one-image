@@ -15,6 +15,7 @@ import {
   type RgbaPlane,
 } from './inpaint-core'
 import { fillHolesClassical } from './classical-fill'
+import { fillHolesBlur, fillHolesPixelate, fillHolesSolid } from './obscure-fill'
 import type { FillProvider } from './auto-route'
 
 // Minimal structural contract for the runtime-loaded ORT bundle. Kept local
@@ -149,11 +150,20 @@ async function run(req: SmartEraseRequest): Promise<ArrayBuffer> {
   const maskPlane: RgbaPlane = { data: new Uint8ClampedArray(req.mask), width: req.width, height: req.height }
   const alphaPlane: RgbaPlane = { data: new Uint8ClampedArray(req.composite), width: req.width, height: req.height }
 
-  if (req.provider === 'classical') {
-    // Model-free diffusion fill: no session, no download, no resampling.
+  if (req.provider !== 'migan') {
+    // Model-free fillers: no session, no download, no resampling. Each produces
+    // a full-frame RGBA plane that only the feathered alpha ever shows, so the
+    // "nothing outside the mask changes" guarantee comes from compositeRgba.
     report({ type: 'stage', stage: 'inference' })
-    const filled = fillHolesClassical(imagePlane, maskPlane)
-    const blended = compositeRgba(imagePlane, { data: filled, width: req.width, height: req.height }, alphaPlane)
+    const generated =
+      req.provider === 'classical'
+        ? fillHolesClassical(imagePlane, maskPlane)
+        : req.provider === 'blur'
+        ? fillHolesBlur(imagePlane, maskPlane)
+        : req.provider === 'pixel'
+        ? fillHolesPixelate(imagePlane, maskPlane)
+        : fillHolesSolid(imagePlane, maskPlane)
+    const blended = compositeRgba(imagePlane, { data: generated, width: req.width, height: req.height }, alphaPlane)
     return blended.buffer as ArrayBuffer
   }
 

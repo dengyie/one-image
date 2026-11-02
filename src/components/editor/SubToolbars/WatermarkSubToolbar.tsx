@@ -11,14 +11,14 @@ export type WatermarkEraseType = 'blur' | 'pixel' | 'blackout' | 'ai'
 
 export interface WatermarkSubToolbarProps {
   onAddWatermark: (options: { text: string; layout: WatermarkLayout; opacity: number; color: string }) => void
-  onAddEraseRegion: (eraseType: WatermarkEraseType) => void
+  onAddEraseRegion: () => void
   onCheckProvenance: (target: 'current' | 'original') => void
   isCheckingProvenance: boolean
   provenanceResult: ProvenanceResult | null
   provenanceError?: string | null
   /** Present when the current state has pending smart-erase regions. */
   hasEraseAiRegions?: boolean
-  onRunSmartErase?: () => void
+  onRunErase?: (eraseType: WatermarkEraseType) => void
   isSmartErasing?: boolean
   smartEraseStage?: SmartEraseStage | null
   smartEraseError?: string | null
@@ -48,6 +48,19 @@ const ERASE_MODES: Array<{ value: SmartEraseMode; label: string; hint: string }>
   { value: 'migan', label: '标准', hint: 'MI-GAN 合成填充：大选区结构更自然（首次需下载 27MB 模型）' },
 ]
 
+const ERASE_TYPE_LABELS: Record<WatermarkEraseType, string> = {
+  blur: '磨砂模糊',
+  pixel: '像素打码',
+  blackout: '实心遮蔽',
+  ai: '智能修复',
+}
+
+const ERASE_TYPE_HINTS: Record<Exclude<WatermarkEraseType, 'ai'>, string> = {
+  blur: '运行后对掩膜内的像素做高斯模糊（强度随选区自适应），掩膜先收紧到检测到的水印笔画；掩膜外像素逐位不变，原图不上传。',
+  pixel: '运行后对掩膜内的像素做马赛克（块对齐全局网格），掩膜先收紧到检测到的水印笔画；掩膜外像素逐位不变。',
+  blackout: '用纯色完整覆盖选区（不收紧到笔画，保证盖住一切残留）；掩膜外像素逐位不变。',
+}
+
 const WATERMARK_COLORS = [
   { label: '半透白', value: 'rgba(255, 255, 255, 0.85)' },
   { label: '暗夜黑', value: 'rgba(0, 0, 0, 0.75)' },
@@ -63,7 +76,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
   provenanceResult,
   provenanceError,
   hasEraseAiRegions = false,
-  onRunSmartErase,
+  onRunErase,
   isSmartErasing = false,
   smartEraseStage,
   smartEraseError,
@@ -226,209 +239,163 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-zinc-400 w-14 shrink-0">消除方式</span>
             <div className="flex items-center gap-1">
+              {(Object.keys(ERASE_TYPE_LABELS) as WatermarkEraseType[]).map((type) => (
+                <button
+                  key={type}
+                  type="button"
+                  onClick={() => setEraseType(type)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
+                    eraseType === type
+                      ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  {ERASE_TYPE_LABELS[type]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] text-zinc-400 w-14 shrink-0">选区方式</span>
+            <div className="flex items-center gap-1">
               <button
                 type="button"
-                onClick={() => setEraseType('blur')}
-                className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
-                  eraseType === 'blur'
+                onClick={() => onEraseMaskShapeSelect('brush')}
+                className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] transition-all ${
+                  eraseMaskShape === 'brush'
                     ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
                     : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                磨砂模糊
+                <UiIcon name="brush" size={12} />
+                <span>涂抹水印</span>
               </button>
               <button
                 type="button"
-                onClick={() => setEraseType('pixel')}
-                className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
-                  eraseType === 'pixel'
+                onClick={() => onEraseMaskShapeSelect('rect')}
+                className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] transition-all ${
+                  eraseMaskShape === 'rect'
                     ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
                     : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                像素打码
-              </button>
-              <button
-                type="button"
-                onClick={() => setEraseType('blackout')}
-                className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
-                  eraseType === 'blackout'
-                    ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                实心遮蔽
-              </button>
-              <button
-                type="button"
-                onClick={() => setEraseType('ai')}
-                className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
-                  eraseType === 'ai'
-                    ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                智能修复
+                <UiIcon name="square" size={12} />
+                <span>框选水印</span>
               </button>
             </div>
           </div>
 
-          {eraseType !== 'ai' && (
+          {eraseMaskShape === 'brush' ? (
             <>
-              <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-zinc-800">
-                点击下方按钮在画面中央生成消除选区，随后可在视口中自由拖拽框选水印位置以完成覆盖消除。
+              <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-emerald-900/40">
+                在画面上沿水印涂抹，只把笔迹覆盖的像素作为掩膜——笔迹外的背景完全不参与处理。
               </p>
-
-              <button
-                type="button"
-                onClick={() => onAddEraseRegion(eraseType)}
-                className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
-              >
-                <UiIcon name="crop" size={13} strokeWidth={2.2} />
-                <span>生成消除水印选区</span>
-              </button>
-            </>
-          )}
-
-          {eraseType === 'ai' && (
-            <>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-zinc-400 w-14 shrink-0">选区方式</span>
+                <span className="text-[11px] text-zinc-400 w-14 shrink-0">笔刷粗细</span>
                 <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => onEraseMaskShapeSelect('brush')}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] transition-all ${
-                      eraseMaskShape === 'brush'
-                        ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    <UiIcon name="brush" size={12} />
-                    <span>涂抹水印</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onEraseMaskShapeSelect('rect')}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] transition-all ${
-                      eraseMaskShape === 'rect'
-                        ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    <UiIcon name="square" size={12} />
-                    <span>框选水印</span>
-                  </button>
-                </div>
-              </div>
-
-              {eraseMaskShape === 'brush' ? (
-                <>
-                  <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-emerald-900/40">
-                    在画面上沿水印文字涂抹，只把笔迹覆盖的像素作为修复掩膜——笔迹外的背景完全不参与合成，这是「图像不变」的关键。
-                  </p>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] text-zinc-400 w-14 shrink-0">笔刷粗细</span>
-                    <div className="flex items-center gap-1">
-                      {ERASE_BRUSH_SIZES.map((size) => (
-                        <button
-                          key={size.value}
-                          type="button"
-                          onClick={() => onEraseBrushSizeSelect(size.value)}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
-                            eraseBrushSize === size.value
-                              ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
-                              : 'text-zinc-400 hover:text-zinc-200'
-                          }`}
-                        >
-                          {size.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onAddEraseRegion('ai')}
-                  className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
-                >
-                  <UiIcon name="crop" size={13} strokeWidth={2.2} />
-                  <span>生成智能修复选框</span>
-                </button>
-              )}
-
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-zinc-400 w-14 shrink-0">填充引擎</span>
-                <div className="flex items-center gap-1">
-                  {ERASE_MODES.map((mode) => (
+                  {ERASE_BRUSH_SIZES.map((size) => (
                     <button
-                      key={mode.value}
+                      key={size.value}
                       type="button"
-                      title={mode.hint}
-                      onClick={() => onEraseModeSelect(mode.value)}
+                      onClick={() => onEraseBrushSizeSelect(size.value)}
                       className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
-                        eraseMode === mode.value
+                        eraseBrushSize === size.value
                           ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
                           : 'text-zinc-400 hover:text-zinc-200'
                       }`}
                     >
-                      {mode.label}
+                      {size.label}
                     </button>
                   ))}
                 </div>
               </div>
-
-              <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-emerald-900/40">
-                {ERASE_MODES.find((mode) => mode.value === eraseMode)?.hint}
-                ；掩膜外像素逐位保留，原图不上传。
-              </p>
-
-              <button
-                type="button"
-                disabled={isSmartErasing || !hasEraseAiRegions}
-                onClick={onRunSmartErase}
-                className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:bg-zinc-700 disabled:text-zinc-500 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-sky-500/20 active:scale-[0.99]"
-              >
-                {isSmartErasing ? (
-                  <>
-                    <span className="animate-spin"><UiIcon name="loader" size={13} /></span>
-                    <span>
-                      {smartEraseStage?.phase === 'model' && smartEraseStage.totalBytes
-                        ? `下载模型 ${Math.round((smartEraseStage.loadedBytes ?? 0) / 1048576)}/${Math.round(smartEraseStage.totalBytes / 1048576)}MB`
-                        : smartEraseStage?.phase === 'session'
-                        ? '初始化推理引擎…'
-                        : smartEraseStage?.phase === 'inference'
-                        ? '正在合成修复…'
-                        : '准备中…'}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <UiIcon name="sparkles" size={13} />
-                    <span>{hasEraseAiRegions ? '运行智能修复（虚线区域）' : '请先涂抹或框选水印'}</span>
-                  </>
-                )}
-              </button>
-
-              {hasEraseAiRegions && onClearEraseRegions && (
-                <button
-                  type="button"
-                  disabled={isSmartErasing}
-                  onClick={onClearEraseRegions}
-                  className="flex items-center justify-center gap-1.5 w-full py-1 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] transition-all border border-zinc-700/60 disabled:opacity-50"
-                >
-                  <UiIcon name="trash" size={12} />
-                  <span>清除全部修复选区</span>
-                </button>
-              )}
-
-              {smartEraseError && (
-                <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-900/60 p-2 rounded-lg font-mono">
-                  {smartEraseError}
-                </div>
-              )}
             </>
+          ) : (
+            <button
+              type="button"
+              onClick={onAddEraseRegion}
+              className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
+            >
+              <UiIcon name="crop" size={13} strokeWidth={2.2} />
+              <span>生成消除选框</span>
+            </button>
+          )}
+
+          {eraseType === 'ai' && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-zinc-400 w-14 shrink-0">填充引擎</span>
+              <div className="flex items-center gap-1">
+                {ERASE_MODES.map((mode) => (
+                  <button
+                    key={mode.value}
+                    type="button"
+                    title={mode.hint}
+                    onClick={() => onEraseModeSelect(mode.value)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] transition-all ${
+                      eraseMode === mode.value
+                        ? 'bg-zinc-700 text-emerald-400 font-medium shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-emerald-900/40">
+            {eraseType === 'ai'
+              ? `${ERASE_MODES.find((mode) => mode.value === eraseMode)?.hint}；掩膜外像素逐位保留，原图不上传。`
+              : ERASE_TYPE_HINTS[eraseType]}
+          </p>
+
+          <button
+            type="button"
+            disabled={isSmartErasing || !hasEraseAiRegions}
+            onClick={() => onRunErase?.(eraseType)}
+            className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:bg-zinc-700 disabled:text-zinc-500 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-sky-500/20 active:scale-[0.99]"
+          >
+            {isSmartErasing ? (
+              <>
+                <span className="animate-spin"><UiIcon name="loader" size={13} /></span>
+                <span>
+                  {eraseType !== 'ai'
+                    ? '正在处理…'
+                    : smartEraseStage?.phase === 'model' && smartEraseStage.totalBytes
+                    ? `下载模型 ${Math.round((smartEraseStage.loadedBytes ?? 0) / 1048576)}/${Math.round(smartEraseStage.totalBytes / 1048576)}MB`
+                    : smartEraseStage?.phase === 'session'
+                    ? '初始化推理引擎…'
+                    : smartEraseStage?.phase === 'inference'
+                    ? '正在合成修复…'
+                    : '准备中…'}
+                </span>
+              </>
+            ) : (
+              <>
+                <UiIcon name="sparkles" size={13} />
+                <span>{hasEraseAiRegions ? `运行${ERASE_TYPE_LABELS[eraseType]}（虚线区域）` : '请先涂抹或框选水印'}</span>
+              </>
+            )}
+          </button>
+
+          {hasEraseAiRegions && onClearEraseRegions && (
+            <button
+              type="button"
+              disabled={isSmartErasing}
+              onClick={onClearEraseRegions}
+              className="flex items-center justify-center gap-1.5 w-full py-1 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] transition-all border border-zinc-700/60 disabled:opacity-50"
+            >
+              <UiIcon name="trash" size={12} />
+              <span>清除全部消除选区</span>
+            </button>
+          )}
+
+          {smartEraseError && (
+            <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-900/60 p-2 rounded-lg font-mono">
+              {smartEraseError}
+            </div>
           )}
         </div>
       )}
