@@ -304,6 +304,9 @@ export function App() {
     if (next === prev) return
     sessionRef.current = next
     setSession(next)
+    // Every session change must land back in the working set, or switching
+    // images would install a stale snapshot and drop the user's edits.
+    if (activeRootIdRef.current) imageSessionsRef.current.set(activeRootIdRef.current, next)
   }, [])
 
   /** Live gesture output (slider sweep); the state comes from the session. */
