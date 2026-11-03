@@ -62,11 +62,12 @@ interface BottomDockProps {
   onAddWatermark: (options: { text: string; layout: WatermarkLayout; opacity: number; color: string }) => void
   onAddEraseRegion: () => void
   onCheckProvenanceTarget: (target: 'current' | 'original') => void
+  onStripMetadata?: () => void
+  isStrippingMetadata?: boolean
   provenanceResultDetail: ProvenanceResult | null
   provenanceError?: string | null
   hasEraseAiRegions?: boolean
   onRunErase?: (eraseType: WatermarkEraseType) => void
-  onCleanAllWatermarks?: () => void
   isSmartErasing?: boolean
   smartEraseStage?: SmartEraseStage | null
   smartEraseError?: string | null
@@ -139,11 +140,12 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   onAddWatermark,
   onAddEraseRegion,
   onCheckProvenanceTarget,
+  onStripMetadata,
+  isStrippingMetadata,
   provenanceResultDetail,
   provenanceError,
   hasEraseAiRegions,
   onRunErase,
-  onCleanAllWatermarks,
   isSmartErasing,
   smartEraseStage,
   smartEraseError,
@@ -226,12 +228,13 @@ export const BottomDock: React.FC<BottomDockProps> = ({
             onAddWatermark={onAddWatermark}
             onAddEraseRegion={onAddEraseRegion}
             onCheckProvenance={onCheckProvenanceTarget}
+            onStripMetadata={onStripMetadata}
+            isStrippingMetadata={isStrippingMetadata}
             isCheckingProvenance={isCheckingProvenance ?? false}
             provenanceResult={provenanceResultDetail}
             provenanceError={provenanceError}
             hasEraseAiRegions={hasEraseAiRegions}
             onRunErase={onRunErase}
-            onCleanAllWatermarks={onCleanAllWatermarks}
             isSmartErasing={isSmartErasing}
             smartEraseStage={smartEraseStage}
             smartEraseError={smartEraseError}

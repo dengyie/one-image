@@ -71,7 +71,8 @@ import type { MosaicType, MosaicShape } from './components/editor/SubToolbars/Mo
 import type { WatermarkLayout, WatermarkEraseType, WatermarkTab } from './components/editor/SubToolbars/WatermarkSubToolbar'
 import { runSmartErase, SMART_ERASE_MAX_EDGE, type SmartEraseStage } from './infrastructure/inpaint/smart-erase'
 import { drawEraseAiMask } from './application/editor-renderer'
-import { refineMaskToStrokes, detectStrokeRegions } from './infrastructure/inpaint/mask-refine'
+import { refineMaskToStrokes } from './infrastructure/inpaint/mask-refine'
+import { stripImageMetadata } from './application/image-metadata-stripper'
 import { countHolePixels } from './infrastructure/inpaint/classical-fill'
 import { routeFill, resolveEraseProvider, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
 import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, resolveCompareSource, MAX_FIT_SCALE } from './components/image-editor-model'
@@ -80,6 +81,10 @@ import './styles.css'
 /** Stable per-document id; also the IndexedDB draft id for local drafts. */
 function createDraftId(): string {
   return `draft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+}
+
+function extensionForMime(mime: string): string {
+  return mime === 'image/jpeg' ? '.jpg' : mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : ''
 }
 
 const viewportSize = () => ({ width: window.innerWidth, height: window.innerHeight })
@@ -173,6 +178,7 @@ export function App() {
   const [outputMime, setOutputMime] = useState('image/webp')
   const [quality, setQuality] = useState(85)
   const [stripMetadata, setStripMetadata] = useState(true)
+  const [isStrippingMetadata, setIsStrippingMetadata] = useState(false)
   const [estimatedBytes, setEstimatedBytes] = useState<number | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
 
@@ -666,19 +672,21 @@ export function App() {
       const ext = mime === 'image/webp' ? 'webp' : mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : 'avif'
       const filename = `${baseName}_edited.${ext}`
 
-      // Nothing was edited and the requested container matches the source: the
-      // only truly "image unchanged" export is the original bytes, so hand them
-      // back untouched instead of round-tripping through a canvas (which would
-      // re-encode, drop the ICC profile, and shift wide-gamut colours).
+      // Keep the original compressed payload only when privacy stripping is off.
+      // When it is on, remove container metadata without touching image pixels.
       const pristine = editorStatesEqual(createEditorState(decodedSource.width, decodedSource.height), currentState)
       if (pristine && file.type === mime) {
-        return { blob: file, filename: `${baseName}_original.${ext}` }
+        if (!stripMetadata) return { blob: file, filename: `${baseName}_original.${ext}` }
+        if (mime === 'image/jpeg' || mime === 'image/png' || mime === 'image/webp') {
+          const cleaned = await stripImageMetadata(file, mime)
+          return { blob: cleaned.blob, filename: `${baseName}_privacy_cleaned.${ext}` }
+        }
       }
 
       const blob = await exportEditor(decodedSource, currentState, factory, mime, q / 100)
       return { blob, filename }
     },
-    [decodedSource, currentState, file, factory]
+    [decodedSource, currentState, file, factory, stripMetadata]
   )
 
   // Download Trigger
@@ -699,7 +707,10 @@ export function App() {
       showToast(`已导出并下载：${filename}`, 'success')
     } catch (err) {
       console.error('Export failed:', err)
-      showToast('导出失败，请重试', 'error')
+      // 清理器对「无法安全处理」的文件（如 EXIF 旋转方向）会给出具体原因，
+      // 直接转发，避免用户只看到笼统的失败提示。
+      const message = err instanceof Error ? err.message : String(err)
+      showToast(`导出失败：${message}`, 'error')
     } finally {
       setIsProcessing(false)
     }
@@ -1098,70 +1109,40 @@ export function App() {
     }
   }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode])
 
-  // One-click whole-image watermark cleanup: scan the full frame for sparse
-  // stroke components, drop the resulting boxes in as erase masks, and run the
-  // smart-repair pipeline pinned to the auto routing (local diffusion / Gaussian
-  // frost only — never the generative model, whose hallucinated patches on
-  // textured backgrounds read as "the picture got covered"). Non-destructive
-  // end to end — the result opens as a new document and the original stays
-  // untouched.
-  const handleCleanAllWatermarks = useCallback(async () => {
-    const state = sessionState(sessionRef.current)
-    if (!decodedSource || !file || !state) return
-    setIsSmartErasing(true)
-    setSmartEraseError(null)
-    setSmartEraseStage(null)
-    let detected = 0
+  const handleStripMetadata = useCallback(async () => {
+    if (!file || !decodedSource || !currentState) return
+    setIsStrippingMetadata(true)
     try {
-      const snapshot = await exportEditor(decodedSource, state, factory, 'image/png', 1)
-      const bitmap = await createImageBitmap(snapshot)
-      const { width, height } = bitmap
-      if (Math.max(width, height) > SMART_ERASE_MAX_EDGE) {
-        bitmap.close()
-        throw new Error(`图片最大边 ${Math.max(width, height)}px 超过消除上限 ${SMART_ERASE_MAX_EDGE}px，请先裁剪或缩放`)
+      const pristine = editorStatesEqual(createEditorState(decodedSource.width, decodedSource.height), currentState)
+      let cleaned: Blob
+      let filename: string
+      let removed: string[]
+      if (pristine) {
+        const output = await stripImageMetadata(file)
+        cleaned = output.blob
+        removed = output.removed
+        filename = `${file.name.replace(/\.[^/.]+$/, '')}_privacy_cleaned${extensionForMime(file.type)}`
+      } else {
+        cleaned = await exportEditor(decodedSource, currentState, factory, 'image/png', 1)
+        removed = ['EXIF/GPS/XMP/C2PA 源容器信息']
+        filename = `${file.name.replace(/\.[^/.]+$/, '')}_privacy_cleaned.png`
       }
-      const imageCanvas = factory.create(width, height)
-      const ctx = imageCanvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
-      ctx.drawImage(bitmap, 0, 0)
-      bitmap.close()
-      const imageData = ctx.getImageData(0, 0, width, height)
-      const regions = detectStrokeRegions({ data: imageData.data, width, height })
-      if (regions.length === 0) {
-        showToast('未检测到疑似水印笔画：可手动涂抹或框选水印后运行', 'info')
-        return
-      }
-      const totalArea = regions.reduce((sum, box) => sum + box.width * box.height, 0)
-      if (totalArea > width * height * 0.6) {
-        showToast(`疑似区域覆盖过大（${Math.round((totalArea / (width * height)) * 100)}%），已取消：请手动涂抹水印后运行`, 'info')
-        return
-      }
-      const now = Date.now()
-      commitEdit((prev) => ({
-        ...prev,
-        annotations: [
-          ...(prev.annotations ?? []).filter((layer) => layer.type !== 'erase-ai'),
-          ...regions.map((box, index) => ({
-            id: `erase_detect_${now}_${index}`,
-            type: 'erase-ai' as const,
-            rect: { x: box.x, y: box.y, width: box.width, height: box.height },
-            color: '#34d399',
-            strokeWidth: 0,
-          })),
-        ],
+      const resultFile = new File([cleaned], filename, { type: cleaned.type })
+      const opened = await documentSwitcher.openDocument(resultFile, (decoded) => ({
+        docId: createDraftId(),
+        file: resultFile,
+        state: createEditorState(decoded.width, decoded.height),
       }))
-      detected = regions.length
-      showToast(`检测到 ${detected} 处疑似水印，开始高斯磨砂清理`, 'success')
+      if (opened) {
+        showToast(removed.length ? `已清理容器信息：${removed.join('、')}；像素未作算法修改` : '未发现可移除的容器元数据；图片像素未作修改', 'success')
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
-      setSmartEraseError(message)
-      showToast(`一键清理失败：${message}`, 'error')
-      return
+      showToast(`隐私信息清理失败：${message}`, 'error')
     } finally {
-      setIsSmartErasing(false)
-      setSmartEraseStage(null)
+      setIsStrippingMetadata(false)
     }
-    if (detected > 0) await handleRunErase('ai', 'auto')
-  }, [decodedSource, file, factory, commitEdit, showToast, handleRunErase])
+  }, [file, decodedSource, currentState, factory, documentSwitcher, showToast])
 
   const handleCheckProvenanceTarget = useCallback(
     async (target: 'current' | 'original') => {
@@ -1651,9 +1632,10 @@ export function App() {
             onAddWatermark={handleAddWatermark}
             onAddEraseRegion={handleAddEraseRegion}
             onCheckProvenanceTarget={handleCheckProvenanceTarget}
+            onStripMetadata={() => void handleStripMetadata()}
+            isStrippingMetadata={isStrippingMetadata}
             hasEraseAiRegions={hasEraseAiRegions}
             onRunErase={(type) => void handleRunErase(type)}
-            onCleanAllWatermarks={() => void handleCleanAllWatermarks()}
             isSmartErasing={isSmartErasing}
             smartEraseStage={smartEraseStage}
             smartEraseError={smartEraseError}
