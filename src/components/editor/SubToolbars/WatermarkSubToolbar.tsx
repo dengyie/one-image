@@ -45,9 +45,9 @@ const ERASE_BRUSH_SIZES = [
 ]
 
 const ERASE_MODES: Array<{ value: SmartEraseMode; label: string; hint: string }> = [
-  { value: 'auto', label: '自动', hint: '按选区大小自动选择：小选区本地扩散，大选区 MI-GAN 合成' },
+  { value: 'auto', label: '自动', hint: '按选区大小自动选择：小选区本地扩散，大选区高斯磨砂——均为纯本地算法，不下载模型、不重采样、不生成' },
   { value: 'classical', label: '快速', hint: '纯本地扩散填充：不下载模型、不重采样，掩膜外逐位不变' },
-  { value: 'migan', label: '标准', hint: 'MI-GAN 合成填充：大选区结构更自然（首次需下载 27MB 模型）' },
+  { value: 'migan', label: '标准', hint: 'MI-GAN 合成填充（实验性）：仅建议平坦背景使用，纹理背景下可能出现明显色块；首次需下载 27MB 模型' },
 ]
 
 const ERASE_TYPE_LABELS: Record<WatermarkEraseType, string> = {
@@ -399,7 +399,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
             type="button"
             disabled={isSmartErasing}
             onClick={() => onCleanAllWatermarks?.()}
-            title="全图扫描疑似水印笔画并自动智能清理；结果在新文档打开，原图不动，可撤销/还原"
+            title="全图扫描疑似水印笔画，用高斯磨砂覆盖检测到的笔画（纯本地算法，掩膜外像素不动）；结果在新文档打开，原图不动，可撤销/还原"
             className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-700 disabled:text-zinc-500 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
           >
             {isSmartErasing ? (

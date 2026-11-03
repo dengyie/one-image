@@ -173,25 +173,40 @@ export interface DetectStrokeOptions {
   /** Components smaller than this many pixels are noise. */
   minComponentPixels?: number
   /**
-   * Boxes whose stroke pixels exceed this share are photo content (an edge or
-   * texture fills its box), not an overlay; they are dropped. Bold watermark
-   * glyphs measure around 0.6-0.7, photo textures near 0.9+, so the gate sits
-   * between them.
+   * Boxes whose stroke pixels exceed this share are solid photo content (a
+   * filled sun disk measures π/4 ≈ 0.785, photo edges and textures higher);
+   * they are dropped. Bold watermark glyphs measure around 0.6-0.7, so the
+   * gate sits just above them.
    */
   maxDensity?: number
+  /**
+   * Boxes whose stroke pixels fall below this share are chains: one connected
+   * band snaking across distant photo features (a mountain ridge, a shoreline)
+   * whose bounding box swallows mostly untouched background. Text letters keep
+   * their box density above ~0.3, so the gate only drops these chains.
+   */
+  minDensity?: number
+  /**
+   * Boxes larger than this share of the frame are photo structures, not
+   * watermark glyphs; they are dropped regardless of density.
+   */
+  maxBoxAreaFraction?: number
+
   /** Hard cap on returned boxes, largest first. */
   maxRegions?: number
 }
 
 /**
  * Whole-image stroke scan for the one-click watermark cleanup: finds the
- * bounding boxes of high-local-contrast components anywhere in the frame, with
- * two guards against destroying ordinary photos. The density gate drops boxes
- * that are mostly stroke (photo edges and textures are dense; watermark glyphs
- * are thin strokes on background), and the region cap bounds how much a single
- * mistaken run can touch. Callers additionally gate on total coverage before
- * filling. Conservative defaults: a higher threshold and a larger minimum
- * component than the in-mask refiner, because there is no user mask to lean on.
+ * bounding boxes of high-local-contrast components anywhere in the frame,
+ * with guards against destroying ordinary photos. The density window drops
+ * solid blobs above `maxDensity` (a filled sun disk) and chained outline
+ * boxes below `minDensity` (a ridge line snaking across the frame); the area
+ * cap drops any single box big enough to be photo structure. What survives is
+ * the profile of text: sparse, mid-density, small boxes. Callers additionally
+ * gate on total coverage before filling. Conservative defaults: a higher
+ * threshold and a larger minimum component than the in-mask refiner, because
+ * there is no user mask to lean on.
  */
 export function detectStrokeRegions(image: RgbaGrid, options: DetectStrokeOptions = {}): PixelBox[] {
   const { width, height } = image
@@ -203,7 +218,10 @@ export function detectStrokeRegions(image: RgbaGrid, options: DetectStrokeOption
   const radius = Math.max(1, Math.round(options.radius ?? 12))
   const dilate = Math.max(0, Math.round(options.dilate ?? 2))
   const minComponentPixels = Math.max(1, Math.round(options.minComponentPixels ?? 24))
-  const maxDensity = Math.min(1, Math.max(0, options.maxDensity ?? 0.8))
+  const maxDensity = Math.min(1, Math.max(0, options.maxDensity ?? 0.75))
+  const minDensity = Math.min(maxDensity, Math.max(0, options.minDensity ?? 0.12))
+  const frameArea = Math.max(1, width * height)
+  const maxBoxPixels = frameArea * Math.min(1, Math.max(0, options.maxBoxAreaFraction ?? 0.03))
   const maxRegions = Math.max(1, Math.round(options.maxRegions ?? 300))
 
   const gray = toGray(image)
@@ -227,7 +245,10 @@ export function detectStrokeRegions(image: RgbaGrid, options: DetectStrokeOption
         if (stroke[y * width + x]) strokePixels++
       }
     }
-    if (strokePixels / total > maxDensity) continue
+    const density = strokePixels / total
+    if (density > maxDensity) continue
+    if (density < minDensity) continue
+    if (total > maxBoxPixels) continue
     accepted.push({ x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 })
   }
   accepted.sort((a, b) => b.width * b.height - a.width * a.height)
