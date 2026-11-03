@@ -40,10 +40,11 @@ describe('routeFill', () => {
     expect(decision.reason).toContain('扩散填充')
   })
 
-  it('auto routes a large hole to MI-GAN', () => {
+  it('auto routes a large hole to the Gaussian frost filler, never MI-GAN', () => {
     const decision = routeFill({ mode: 'auto', mask: mask(200, 200, 200 * 200), imageWidth: 200, imageHeight: 200 })
-    expect(decision.provider).toBe('migan')
-    expect(decision.reason).toContain('MI-GAN')
+    expect(decision.provider).toBe('blur')
+    expect(decision.provider).not.toBe('migan')
+    expect(decision.reason).toContain('高斯磨砂')
   })
 
   it('treats a low-coverage hole on a huge frame as classical', () => {

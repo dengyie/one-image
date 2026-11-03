@@ -197,4 +197,64 @@ describe('detectStrokeRegions', () => {
     const regions = detectStrokeRegions(image, { maxRegions: 5 })
     expect(regions.length).toBe(5)
   })
+
+  it('rejects a filled disk (sun): solid blob above the density window', () => {
+    // A bright disk on a flat sky. A solid disk measures ~π/4 ≈ 0.785 stroke
+    // density in its bounding box — above maxDensity 0.75 — and its box is a
+    // photo structure, exactly what one-click cleanup must not touch.
+    const size = 160
+    const image = grid(size, size, () => [150, 150, 150, 255])
+    const cx = 80
+    const cy = 80
+    const r = 10
+    for (let y = cy - r; y <= cy + r; y++) {
+      for (let x = cx - r; x <= cx + r; x++) {
+        if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) image.data.set([250, 240, 200, 255], (y * size + x) * 4)
+      }
+    }
+    expect(detectStrokeRegions(image)).toEqual([])
+  })
+
+  it('rejects a box larger than maxBoxAreaFraction even when its density looks like text', () => {
+    // A text-like bar on a small frame: its box covers 4.4% of the frame, over
+    // the 3% default cap, so a structure-sized box is dropped no matter how
+    // text-like its density is.
+    const image = grid(100, 80, () => [128, 128, 128, 255])
+    for (let y = 36; y < 40; y++) for (let x = 20; x < 60; x++) image.data.set([235, 235, 235, 255], (y * 100 + x) * 4)
+    expect(detectStrokeRegions(image)).toEqual([])
+    // The cap is relative to the frame: raising it lets the same bar through.
+    const withBigCap = detectStrokeRegions(image, { maxBoxAreaFraction: 0.1 })
+    expect(withBigCap.length).toBe(1)
+    expect(withBigCap[0].x <= 20 && withBigCap[0].y <= 36).toBe(true)
+  })
+
+  it('rejects a long chained ridge line via the density window', () => {
+    // A sparse zigzag snaking across the frame: one connected band whose box
+    // density sits below minDensity, unlike text letters (~0.3-0.6).
+    const width = 400
+    const height = 300
+    const image = grid(width, height, () => [110, 110, 110, 255])
+    for (let x = 10; x < 390; x++) {
+      const y = 150 + Math.round(40 * Math.sin(x / 22))
+      for (let dy = 0; dy < 4; dy++) image.data.set([235, 235, 235, 255], ((y + dy) * width + x) * 4)
+    }
+    expect(detectStrokeRegions(image)).toEqual([])
+    // Widening the window proves the gate (not the area cap) rejects it.
+    const withWideWindow = detectStrokeRegions(image, { minDensity: 0, maxBoxAreaFraction: 0.9 })
+    expect(withWideWindow.length).toBeGreaterThan(0)
+  })
+
+  it('keeps detecting text bars when the new gates are at their defaults', () => {
+    // Regression guard for the gates: ordinary thin text-like strokes must
+    // still survive density window + area cap.
+    const width = 400
+    const height = 300
+    const image = grid(width, height, () => [128, 128, 128, 255])
+    for (let dy = 0; dy < 4; dy++) {
+      for (let dx = 0; dx < 40; dx++) image.data.set([235, 235, 235, 255], ((100 + dy) * width + 40 + dx) * 4)
+      for (let dx = 0; dx < 40; dx++) image.data.set([235, 235, 235, 255], ((160 + dy) * width + 120 + dx) * 4)
+    }
+    const regions = detectStrokeRegions(image)
+    expect(regions.length).toBe(2)
+  })
 })

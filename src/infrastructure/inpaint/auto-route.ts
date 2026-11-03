@@ -3,13 +3,17 @@
 //
 //   - classical  push-pull diffusion: no download, no resampling, exact outside
 //                the mask. Ideal for small holes (thin watermark strokes,
-//                dust, stray specks) where a generative fill would only lose
+//                dust, stray specks) where any resampling would only lose
 //                detail it never needed to invent.
-//   - migan      the MI-GAN pipeline: synthesizes plausible structure for larger
-//                holes, at the cost of its internal 512px working resolution.
+//   - blur       Gaussian-style obscure fill (fillHolesBlur): floods the hole
+//                with a σ-adapted blur of its neighbourhood. Its failure mode
+//                is a soft frost patch; it can never hallucinate.
 //
-// Auto routing picks classical only for holes small enough that diffusion is
-// indistinguishable from (and strictly safer than) a generated fill.
+// Auto routing never sends a watermark hole to MI-GAN: on textured photo
+// backgrounds the generative fill comes back as a visibly darker, structurally
+// wrong patch (the exact "the tool covered my picture" complaint), while the
+// local fillers degrade gracefully. MI-GAN remains available as the explicit
+// 标准 engine for flat-background holes where synthesis does help.
 //
 // Pure module (no canvas, no DOM) so it runs and tests in Node.
 
@@ -19,7 +23,8 @@ import { countHolePixels } from './classical-fill'
 export type FillProvider = 'classical' | 'migan' | 'blur' | 'pixel' | 'solid'
 /** What the user picked in the toolbar. The erase tab's blur/pixel/blackout
  * options map straight onto the last three; `routeFill` only ever returns the
- * first two because routing applies to the smart-repair mode alone. */
+ * first two for the smart-repair mode because routing must stay predictable
+ * and model-free unless the user explicitly picks MI-GAN. */
 export type SmartEraseMode = 'auto' | 'classical' | 'migan'
 
 export interface RouteInput {
@@ -67,10 +72,10 @@ export function routeFill(input: RouteInput): RouteDecision {
     }
   }
   return {
-    provider: 'migan',
+    provider: 'blur',
     coverage,
     holePixels,
-    reason: `选区较大（${holePixels}px），使用 MI-GAN 合成填充`,
+    reason: `选区较大（${holePixels}px），使用高斯磨砂填充，不生成、不改掩膜外像素`,
   }
 }
 

@@ -126,7 +126,7 @@ export function App() {
   // so the entry buttons stay hidden until the operator configures providers.
   const [showImageGenModal, setShowImageGenModal] = useState(false)
   const [imagegenEnabled, setImagegenEnabled] = useState(false)
-  // Smart erase (browser-local MI-GAN inpainting)
+  // Smart erase (browser-local fillers: diffusion / Gaussian frost / optional MI-GAN)
   const [isSmartErasing, setIsSmartErasing] = useState(false)
   const [smartEraseStage, setSmartEraseStage] = useState<SmartEraseStage | null>(null)
   const [smartEraseError, setSmartEraseError] = useState<string | null>(null)
@@ -157,7 +157,8 @@ export function App() {
   const [mosaicBrushSize, setMosaicBrushSize] = useState(48)
   // Smart-erase mask: painted strokes by default so only the watermark pixels
   // become the hole; a box is still available. 'auto' routes small holes to the
-  // local diffusion filler and larger ones to MI-GAN.
+  // local diffusion filler and larger ones to the Gaussian frost filler; MI-GAN
+  // runs only when explicitly picked in the toolbar.
   const [eraseMaskShape, setEraseMaskShape] = useState<MosaicShape>('brush')
   const [eraseBrushSize, setEraseBrushSize] = useState(32)
   const [eraseMode, setEraseMode] = useState<SmartEraseMode>('auto')
@@ -913,14 +914,16 @@ export function App() {
   // regions, and open the result as a new document. Pixels outside the mask are
   // preserved bit-for-bit by the compositor; everything here stays on-device.
   const ERASE_ENGINE_LABELS: Record<FillProvider, string> = {
-    blur: '磨砂模糊',
+    blur: '高斯磨砂',
     pixel: '像素打码',
     solid: '实心遮蔽',
     classical: '本地扩散',
     migan: 'MI-GAN 合成',
   }
 
-  const handleRunErase = useCallback(async (eraseType: WatermarkEraseType) => {
+  // modeOverride lets the one-click cleanup pin the routing to the safe local
+  // path regardless of which engine the toolbar happens to have selected.
+  const handleRunErase = useCallback(async (eraseType: WatermarkEraseType, modeOverride?: SmartEraseMode) => {
     const state = sessionState(sessionRef.current)
     if (!decodedSource || !file || !state) return
     const aiLayers = (state.annotations ?? []).filter((layer) => layer.type === 'erase-ai' && layer.rect)
@@ -983,10 +986,11 @@ export function App() {
       }
 
       // Route the hole to a filler: the AI mode picks between local diffusion
-      // and MI-GAN by hole size; the other modes are their own filler.
+      // and Gaussian frost by hole size (MI-GAN only when explicitly picked);
+      // the other modes are their own filler.
       const provider: FillProvider =
         eraseType === 'ai'
-          ? routeFill({ mode: eraseMode, mask: maskGrid, imageWidth: width, imageHeight: height }).provider
+          ? routeFill({ mode: modeOverride ?? eraseMode, mask: maskGrid, imageWidth: width, imageHeight: height }).provider
           : resolveEraseProvider(eraseType)
 
       // Composite alpha: the working mask blurred twice so the interior stays
@@ -1070,8 +1074,11 @@ export function App() {
 
   // One-click whole-image watermark cleanup: scan the full frame for sparse
   // stroke components, drop the resulting boxes in as erase masks, and run the
-  // smart-repair pipeline with the current engine. Non-destructive end to end —
-  // the result opens as a new document and the original stays untouched.
+  // smart-repair pipeline pinned to the auto routing (local diffusion / Gaussian
+  // frost only — never the generative model, whose hallucinated patches on
+  // textured backgrounds read as "the picture got covered"). Non-destructive
+  // end to end — the result opens as a new document and the original stays
+  // untouched.
   const handleCleanAllWatermarks = useCallback(async () => {
     const state = sessionState(sessionRef.current)
     if (!decodedSource || !file || !state) return
@@ -1117,7 +1124,7 @@ export function App() {
         ],
       }))
       detected = regions.length
-      showToast(`检测到 ${detected} 处疑似水印，开始智能清理`, 'success')
+      showToast(`检测到 ${detected} 处疑似水印，开始高斯磨砂清理`, 'success')
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       setSmartEraseError(message)
@@ -1127,7 +1134,7 @@ export function App() {
       setIsSmartErasing(false)
       setSmartEraseStage(null)
     }
-    if (detected > 0) await handleRunErase('ai')
+    if (detected > 0) await handleRunErase('ai', 'auto')
   }, [decodedSource, file, factory, commitEdit, showToast, handleRunErase])
 
   const handleCheckProvenanceTarget = useCallback(
