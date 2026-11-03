@@ -138,17 +138,33 @@ if ! $supervisor_ctl restart oneimage; then
   rollback_current
   exit 1
 fi
-health_code=$(curl --silent --show-error --max-time 5 -o /tmp/oneimage-health.json -w '%{http_code}' "$health_url") || {
-  rollback_current
-  exit 1
-}
+# A cold start on this host needs 5-14s before the first HTTP response lands
+# (NFS-backed bundle + SQLite open; measured 6.8s), so a single 5s probe is
+# guaranteed to misjudge a healthy release. Probe with a bounded retry budget
+# instead, and still fail closed (rollback) when the app never becomes healthy.
+health_code=''
+for attempt in $(seq 1 20); do
+  health_code=$(curl --silent --max-time 10 -o /tmp/oneimage-health.json -w '%{http_code}' "$health_url" 2>/dev/null) || health_code=''
+  if [ "$health_code" = 200 ] || [ "$health_code" = 503 ]; then
+    grep -Eq '"status":"(ok|degraded)"' /tmp/oneimage-health.json 2>/dev/null && break
+  fi
+  [ "$attempt" -lt 20 ] && sleep 2
+done
 case "$health_code" in 200|503) ;; *) rollback_current; exit 1 ;; esac
 grep -Eq '"status":"(ok|degraded)"' /tmp/oneimage-health.json || { rollback_current; exit 1; }
-curl --fail --silent --show-error --max-time 5 "$capabilities_url" >/tmp/oneimage-capabilities.json || {
+capabilities_ok=''
+for attempt in $(seq 1 10); do
+  if curl --fail --silent --show-error --max-time 5 "$capabilities_url" >/tmp/oneimage-capabilities.json 2>/dev/null \
+    && grep -q '"maxInputBytes"' /tmp/oneimage-capabilities.json; then
+    capabilities_ok=1
+    break
+  fi
+  [ "$attempt" -lt 10 ] && sleep 2
+done
+if [ -z "$capabilities_ok" ]; then
   rollback_current
   exit 1
-}
-grep -q '"maxInputBytes"' /tmp/oneimage-capabilities.json || { rollback_current; exit 1; }
+fi
 rm -f "$archive" "$checksum"
 active_release=$(readlink -f "$current" 2>/dev/null || true)
 active_entrypoint=$(readlink -f "$root/run.sh" 2>/dev/null || true)
