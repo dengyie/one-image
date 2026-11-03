@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   createDocumentSwitcher,
+  resolveSwitchDirection,
   type SwitchFailure,
 } from '../src/application/document-switch'
 import type { DecodedSource } from '../src/application/editor-renderer'
@@ -329,5 +330,20 @@ describe('standalone (multi-image) sessions', () => {
     expect(ok).toBe(false)
     expect(harness.errors).toHaveLength(1)
     expect(harness.errors[0].failure).toBe('load')
+  })
+
+  it('resolveSwitchDirection pages forward toward later working-set entries', () => {
+    expect(resolveSwitchDirection(['a', 'b', 'c'], 'a', 'c')).toBe('forward')
+    expect(resolveSwitchDirection(['a', 'b', 'c'], 'b', 'c')).toBe('forward')
+  })
+
+  it('resolveSwitchDirection pages backward toward earlier entries', () => {
+    expect(resolveSwitchDirection(['a', 'b', 'c'], 'c', 'a')).toBe('backward')
+    expect(resolveSwitchDirection(['a', 'b', 'c'], 'c', 'b')).toBe('backward')
+  })
+
+  it('resolveSwitchDirection defaults to forward for ids outside the set', () => {
+    expect(resolveSwitchDirection(['a', 'b'], 'a', 'ghost')).toBe('forward')
+    expect(resolveSwitchDirection(['a', 'b'], 'ghost', 'b')).toBe('forward')
   })
 })

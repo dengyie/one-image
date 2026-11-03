@@ -9,6 +9,22 @@ import {
 
 export type SwitchFailure = 'load' | 'restore' | 'switch'
 
+/** Which way the spatial canvas slides during an image-to-image switch. */
+export type SwitchDirection = 'forward' | 'backward'
+
+/**
+ * Reads the switch direction off the working-set order: moving to a later
+ * entry pages forward (the incoming image slides in from the right). Unknown
+ * ids default to forward so a missing entry can never flip the animation the
+ * wrong way; equal ids never reach this (the switch is a no-op upstream).
+ */
+export function resolveSwitchDirection(ids: readonly string[], fromId: string, toId: string): SwitchDirection {
+  const from = ids.indexOf(fromId)
+  const to = ids.indexOf(toId)
+  if (from === -1 || to === -1) return 'forward'
+  return to > from ? 'forward' : 'backward'
+}
+
 export interface DocumentSwitchHooks {
   /** Decodes a file; injected so the switch choreography is testable. */
   decode(file: File): Promise<DecodedSource>
