@@ -33,7 +33,7 @@ import {
   undoSession,
   type EditorSession,
 } from './domain/editor-session'
-import { createDocumentSwitcher } from './application/document-switch'
+import { createDocumentSwitcher, resolveSwitchDirection, type SwitchDirection } from './application/document-switch'
 import {
   checkProvenance,
   createProvenanceInput,
@@ -204,6 +204,15 @@ export function App() {
   const switchActiveRoot = useCallback((id: string | null) => {
     activeRootIdRef.current = id
     setActiveRootId(id)
+  }, [])
+
+  // Switch animation hint: captured at gesture time (direction comes from the
+  // working-set order), consumed by CanvasViewport when the document flips.
+  const [switchHint, setSwitchHint] = useState<{ dir: SwitchDirection | 'open'; token: number } | null>(null)
+  const switchHintSeq = useRef(0)
+  const beginSwitchHint = useCallback((dir: SwitchDirection | 'open') => {
+    switchHintSeq.current += 1
+    setSwitchHint({ dir, token: switchHintSeq.current })
   }, [])
   const setRootOriginal = useCallback(
     (rootId: string, decoded: DecodedSource) => {
@@ -529,6 +538,7 @@ export function App() {
 
       setErrorMessage(null)
       const rootId = createDraftId()
+      beginSwitchHint('open')
       switchActiveRoot(rootId)
       let dims = { width: 0, height: 0 }
       const opened = await documentSwitcher.openStandaloneDocument(nextFile, (decoded) => {
@@ -548,7 +558,7 @@ export function App() {
         showToast(`已载入 ${nextFile.name}，完全在本地处理`, 'success')
       }
     },
-    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, openImages, isSmartErasing]
+    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, beginSwitchHint, openImages, isSmartErasing]
   )
 
   // Crop drag output: visible immediately, not yet an undoable step.
@@ -864,6 +874,13 @@ export function App() {
       if (rootId === activeRootIdRef.current) return
       const target = imageSessionsRef.current.get(rootId)
       if (!target) return
+      beginSwitchHint(
+        resolveSwitchDirection(
+          openImages.map((img) => img.rootId),
+          activeRootIdRef.current ?? '',
+          rootId,
+        ),
+      )
       switchActiveRoot(rootId)
       void documentSwitcher.applySession(target).then(() => {
         // A silently aborted switch (an edit landed during the decode) leaves
@@ -873,7 +890,7 @@ export function App() {
         }
       })
     },
-    [documentSwitcher, switchActiveRoot, isSmartErasing]
+    [documentSwitcher, switchActiveRoot, beginSwitchHint, openImages, isSmartErasing]
   )
 
   const handleCloseImage = useCallback(
@@ -889,6 +906,15 @@ export function App() {
       setOpenImages(remaining)
       if (rootId !== activeRootIdRef.current) return
       const next = remaining[remaining.length - 1] ?? null
+      if (next) {
+        beginSwitchHint(
+          resolveSwitchDirection(
+            openImages.map((img) => img.rootId),
+            rootId,
+            next.rootId,
+          ),
+        )
+      }
       switchActiveRoot(next?.rootId ?? null)
       if (next) {
         const target = imageSessionsRef.current.get(next.rootId)!
@@ -906,7 +932,7 @@ export function App() {
         setDecodedSource(null)
       }
     },
-    [openImages, documentSwitcher, switchActiveRoot, flushPendingPersist, isSmartErasing]
+    [openImages, documentSwitcher, switchActiveRoot, beginSwitchHint, flushPendingPersist, isSmartErasing]
   )
 
   // Watermark erase: bake the current state at full resolution, run the filler
@@ -1201,6 +1227,7 @@ export function App() {
         showToast(`工作集最多同时打开 ${MAX_OPEN_IMAGES} 张图片，请先在左侧列表移除部分图片`, 'info')
         return
       }
+      beginSwitchHint('open')
       switchActiveRoot(local.id)
       let dims = { width: 0, height: 0 }
       const restored = await documentSwitcher.openStandaloneDocument(
@@ -1221,7 +1248,7 @@ export function App() {
       setShowHistoryDrawer(false)
       showToast(`已恢复草稿：${local.title}`, 'success')
     },
-    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, openImages, isSmartErasing]
+    [documentSwitcher, showToast, setRootOriginal, switchActiveRoot, beginSwitchHint, openImages, isSmartErasing]
   )
 
   // Restore project from history item
@@ -1556,6 +1583,8 @@ export function App() {
           <main className="w-full h-full">
             <CanvasViewport
               source={decodedSource}
+              docKey={activeRootId}
+              switchHint={switchHint}
               compareSource={resolveCompareSource(decodedSource, rootOriginalMap.current, activeRootIdRef.current)}
               state={currentState}
               activeTool={activeTool}

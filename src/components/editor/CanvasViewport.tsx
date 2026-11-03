@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react'
 import type { EditorState, Rect, AnnotationLayer } from '../../domain/editor-state'
 import { createEditorState, clampCrop, rotatedDimensions, isStrokePointRedundant } from '../../domain/editor-state'
 import { renderEditor, schedulePreview, planRenderDimensions, PREVIEW_MAX_EDGE, type DecodedSource } from '../../application/editor-renderer'
 import { createBrowserCanvasFactory } from '../../infrastructure/editor-canvas'
 import { mapPointerToSource, mapSourceRectToViewport, createCropGesture, updateCropGesture, computeCursorAnchoredPan, clampZoom, isNearActualSize, type CropHandle, type CropGesture } from '../image-editor-model'
+import { resolveSwitchDirection, type SwitchDirection } from '../../application/document-switch'
 import type { ActiveTool } from './BottomDock'
 import type { MarkupMode } from './SubToolbars/MarkupSubToolbar'
 import type { MosaicType, MosaicShape } from './SubToolbars/MosaicSubToolbar'
@@ -58,6 +59,17 @@ interface CanvasViewportProps {
    * state it is drawn onto comes from the session, never from this render.
    */
   onAddAnnotation: (layer: AnnotationLayer) => void
+  /** Identity of the open document (working-set root id); changes on switch. */
+  docKey?: string | null
+  /** Gesture hint for the pending switch: slide direction, or open fade. */
+  switchHint?: CanvasSwitchHint | null
+}
+
+/** Direction the viewport should animate toward for the next document. */
+export interface CanvasSwitchHint {
+  dir: SwitchDirection | 'open'
+  /** Monotonic token so a newer click supersedes an in-flight animation. */
+  token: number
 }
 
 export const CanvasViewport: React.FC<CanvasViewportProps> = ({
@@ -88,6 +100,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onCommitDraft,
   onCancelDraft,
   onAddAnnotation,
+  docKey = null,
+  switchHint = null,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -125,6 +139,24 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   // Canvas factory
   const factory = useRef(createBrowserCanvasFactory()).current
 
+  // Image-switch transition. When the open document changes, the master
+  // canvas still shows the outgoing bitmap (the session decode has not
+  // committed yet), so we can snapshot it in a layout effect, then slide
+  // old and new apart like turning a page. Animated on the canvas itself,
+  // never on the pan/zoom wrapper, so viewport transforms stay untouched.
+  const [switchFx, setSwitchFx] = useState<{
+    snapshot: HTMLCanvasElement | null
+    dir: SwitchDirection | 'open'
+    token: number
+    width: number
+    height: number
+  } | null>(null)
+  const prevDocKeyRef = useRef<string | null>(null)
+  const fxCanvasRef = useRef<HTMLCanvasElement>(null)
+  const fxTokenRef = useRef(0)
+  const switchHintRef = useRef(switchHint)
+  switchHintRef.current = switchHint
+
   // Render canvas pipeline
   useEffect(() => {
     if (!source || !canvasRef.current) return
@@ -159,6 +191,79 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     return cancel
   }, [source, state, activeTool, isComparingOriginal, compareSource, factory])
+
+  // Capture the outgoing frame the moment the document identity flips —
+  // synchronously, before the async session decode repaints the canvas.
+  useLayoutEffect(() => {
+    const prev = prevDocKeyRef.current
+    prevDocKeyRef.current = docKey
+    if (typeof window === 'undefined') return
+    if (!docKey || prev === docKey || !canvasRef.current) return
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    const canvas = canvasRef.current
+    let snapshot: HTMLCanvasElement | null = null
+    if (prev) {
+      snapshot = document.createElement('canvas')
+      snapshot.width = canvas.width
+      snapshot.height = canvas.height
+      snapshot.getContext('2d')?.drawImage(canvas, 0, 0)
+    }
+    fxTokenRef.current += 1
+    setSwitchFx({
+      snapshot,
+      dir: switchHintRef.current?.dir ?? 'forward',
+      token: switchHintRef.current?.token ?? fxTokenRef.current,
+      width: canvas.width,
+      height: canvas.height,
+    })
+  }, [docKey])
+
+  // Play the transition: the new frame slides in from the turn direction
+  // while the frozen old frame slides out the other way. Opacity holds at 0
+  // for the first third so the async repaint of the new document lands
+  // before the incoming image becomes visible.
+  useEffect(() => {
+    if (!switchFx) return
+    const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)'
+    const DUR = 360
+    const master = canvasRef.current
+    if (master && switchFx.dir !== 'open') {
+      const fromX = switchFx.dir === 'forward' ? 22 : -22
+      master.animate(
+        [
+          { transform: `translateX(${fromX}%)`, opacity: 0 },
+          { transform: `translateX(${fromX * 0.45}%)`, opacity: 0, offset: 0.35 },
+          { transform: 'none', opacity: 1 },
+        ],
+        { duration: DUR, easing: EASE },
+      )
+      const overlay = fxCanvasRef.current
+      if (overlay && switchFx.snapshot) {
+        overlay.width = switchFx.snapshot.width
+        overlay.height = switchFx.snapshot.height
+        overlay.getContext('2d')?.drawImage(switchFx.snapshot, 0, 0)
+        const outX = switchFx.dir === 'forward' ? -18 : 18
+        overlay.animate(
+          [
+            { transform: 'none', opacity: 1 },
+            { transform: `translateX(${outX}%) scale(0.97)`, opacity: 0 },
+          ],
+          { duration: DUR, easing: EASE, fill: 'forwards' },
+        )
+      }
+    } else if (master) {
+      // First open of a document (nothing to turn away): a quiet reveal.
+      master.animate(
+        [
+          { transform: 'scale(0.955)', opacity: 0 },
+          { transform: 'none', opacity: 1 },
+        ],
+        { duration: 300, easing: EASE },
+      )
+    }
+    const timer = window.setTimeout(() => setSwitchFx(null), DUR + 80)
+    return () => window.clearTimeout(timer)
+  }, [switchFx])
 
   // Space key tracking for Pan
   useEffect(() => {
@@ -727,6 +832,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
         {/* Master rendered canvas */}
         <canvas ref={canvasRef} className="block relative z-10 max-w-none" />
+        {switchFx?.snapshot && (
+          <canvas
+            key={switchFx.token}
+            ref={fxCanvasRef}
+            className="pointer-events-none absolute inset-0 z-30 max-w-none"
+            style={{ width: switchFx.width, height: switchFx.height }}
+          />
+        )}
 
         {/* Ephemeral in-flight drawing stroke overlay */}
         {currentStroke && (
