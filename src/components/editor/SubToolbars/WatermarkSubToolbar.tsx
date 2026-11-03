@@ -14,13 +14,14 @@ export interface WatermarkSubToolbarProps {
   onAddWatermark: (options: { text: string; layout: WatermarkLayout; opacity: number; color: string }) => void
   onAddEraseRegion: () => void
   onCheckProvenance: (target: 'current' | 'original') => void
+  onStripMetadata?: () => void
+  isStrippingMetadata?: boolean
   isCheckingProvenance: boolean
   provenanceResult: ProvenanceResult | null
   provenanceError?: string | null
   /** Present when the current state has pending smart-erase regions. */
   hasEraseAiRegions?: boolean
   onRunErase?: (eraseType: WatermarkEraseType) => void
-  onCleanAllWatermarks?: () => void
   isSmartErasing?: boolean
   smartEraseStage?: SmartEraseStage | null
   smartEraseError?: string | null
@@ -74,12 +75,13 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
   onAddWatermark,
   onAddEraseRegion,
   onCheckProvenance,
+  onStripMetadata,
+  isStrippingMetadata = false,
   isCheckingProvenance,
   provenanceResult,
   provenanceError,
   hasEraseAiRegions = false,
   onRunErase,
-  onCleanAllWatermarks,
   isSmartErasing = false,
   smartEraseStage,
   smartEraseError,
@@ -399,26 +401,6 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
             </button>
           )}
 
-          <button
-            type="button"
-            disabled={isSmartErasing}
-            onClick={() => onCleanAllWatermarks?.()}
-            title="全图扫描疑似水印笔画，用高斯磨砂覆盖检测到的笔画（纯本地算法，掩膜外像素不动）；结果在新文档打开，原图不动，可撤销/还原"
-            className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-700 disabled:text-zinc-500 text-zinc-950 font-medium text-[11px] transition-all shadow-md shadow-emerald-500/20 active:scale-[0.99]"
-          >
-            {isSmartErasing ? (
-              <>
-                <span className="animate-spin"><UiIcon name="loader" size={13} /></span>
-                <span>正在扫描全图…</span>
-              </>
-            ) : (
-              <>
-                <UiIcon name="sparkles" size={13} />
-                <span>一键清理全图水印</span>
-              </>
-            )}
-          </button>
-
           {smartEraseError && (
             <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-900/60 p-2 rounded-lg font-mono">
               {smartEraseError}
@@ -491,8 +473,17 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
             </div>
           )}
 
+          <button
+            type="button"
+            disabled={isStrippingMetadata}
+            onClick={() => onStripMetadata?.()}
+            className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-emerald-500/90 hover:bg-emerald-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-zinc-950 font-medium text-[11px] transition-all"
+          >
+            {isStrippingMetadata ? <span className="animate-spin"><UiIcon name="loader" size={12} /></span> : <UiIcon name="shield-check" size={12} />}
+            <span>{isStrippingMetadata ? '正在清理可移除信息…' : '清除可移除的隐形信息'}</span>
+          </button>
           <p className="text-[10px] text-zinc-400 leading-tight">
-            注：此处检测的是嵌入在像素频域内的隐形水印（SynthID）与 C2PA 数字凭证。清除可见文字水印不会清除底层隐形签名。
+            注：检测的是 SynthID 像素频域信号与 C2PA 凭证。清理按钮只移除 EXIF/GPS/XMP/C2PA 容器信息，不重绘像素；SynthID 只能检测，不能在保证原图不变的前提下无损移除。
           </p>
         </div>
       )}
