@@ -55,7 +55,7 @@ export interface SmartEraseRequest {
 
 export type SmartEraseResponse =
   | { type: 'progress'; runId: string; phase: 'model'; loadedBytes: number; totalBytes: number | null }
-  | { type: 'stage'; runId: string; stage: 'session' | 'inference' }
+  | { type: 'stage'; runId: string; stage: 'session' | 'inference'; provider?: FillProvider }
   | { type: 'done'; runId: string; rgba: ArrayBuffer }
   | { type: 'error'; runId: string; message: string }
 
@@ -154,7 +154,9 @@ async function run(req: SmartEraseRequest): Promise<ArrayBuffer> {
     // Model-free fillers: no session, no download, no resampling. Each produces
     // a full-frame RGBA plane that only the feathered alpha ever shows, so the
     // "nothing outside the mask changes" guarantee comes from compositeRgba.
-    report({ type: 'stage', stage: 'inference' })
+    // The provider rides along so the UI can label the progress honestly
+    // (frost/diffusion instead of the model's "synthesis" wording).
+    report({ type: 'stage', stage: 'inference', provider: req.provider })
     let generated: Uint8ClampedArray
     switch (req.provider) {
       case 'classical':
@@ -183,7 +185,7 @@ async function run(req: SmartEraseRequest): Promise<ArrayBuffer> {
   let inferenceSession = await getSession(req.runId)
   const ort = await loadOrt()
 
-  report({ type: 'stage', stage: 'inference' })
+  report({ type: 'stage', stage: 'inference', provider: req.provider })
   const imageTensor = new ort.Tensor('uint8', rgbaToRgbChw(imagePlane), [1, 3, req.height, req.width])
   const maskTensor = new ort.Tensor('uint8', maskToBinary(maskPlane), [1, 1, req.height, req.width])
   const feeds: Record<string, InstanceType<OrtNamespace['Tensor']>> = {

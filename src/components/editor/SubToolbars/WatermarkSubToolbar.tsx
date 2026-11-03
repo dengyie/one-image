@@ -371,7 +371,11 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
                     : smartEraseStage?.phase === 'session'
                     ? '初始化推理引擎…'
                     : smartEraseStage?.phase === 'inference'
-                    ? '正在合成修复…'
+                    ? smartEraseStage.provider === 'classical'
+                      ? '正在扩散填充…'
+                      : smartEraseStage.provider === 'blur'
+                      ? '正在磨砂填充…'
+                      : '正在合成修复…'
                     : '准备中…'}
                 </span>
               </>
