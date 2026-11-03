@@ -23,7 +23,7 @@ export interface SmartEraseInput {
 export type SmartEraseStage =
   | { phase: 'model'; loadedBytes: number; totalBytes: number | null }
   | { phase: 'session' }
-  | { phase: 'inference' }
+  | { phase: 'inference'; provider?: FillProvider }
 
 // Minimal structural contract so tests can inject a fake worker; a real
 // Worker satisfies it as-is. Handlers are EventListener-typed because the DOM
@@ -82,7 +82,11 @@ export function runSmartErase(
         return
       }
       if (message.type === 'stage') {
-        onStage({ phase: message.stage })
+        onStage(
+          message.stage === 'inference'
+            ? { phase: 'inference', provider: message.provider }
+            : { phase: 'session' }
+        )
         return
       }
       if (message.type === 'done') {
