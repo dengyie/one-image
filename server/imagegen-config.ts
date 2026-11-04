@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 // (path to a JSON file, the recommended form on pxed where it can sit next
 // to the 0600 .env).
 
-export type ImagegenProviderType = 'openai-images' | 'gemini'
+export type ImagegenProviderType = 'openai-images' | 'openai-chat-image' | 'gemini'
 
 export interface ImagegenProviderConfig {
   id: string
@@ -24,6 +24,13 @@ export interface ImagegenProviderConfig {
   // { responseModalities: ["TEXT", "IMAGE"] } for preview models that
   // require it.
   generationConfig?: Record<string, unknown>
+  // Aggregators that front a self-hosted image backend often return the
+  // produced file as a URL built from *that backend's* own view of itself —
+  // typically a loopback address that is meaningless to anyone else. The
+  // operator declares the origin they can actually reach it on, and the
+  // adapter re-points such URLs there (path and query preserved, origin
+  // replaced wholesale, so this can never redirect a fetch elsewhere).
+  mediaOrigin?: string
 }
 
 export interface ImagegenConfigResult {
@@ -31,7 +38,7 @@ export interface ImagegenConfigResult {
   warnings: string[]
 }
 
-const PROVIDER_TYPES: ImagegenProviderType[] = ['openai-images', 'gemini']
+const PROVIDER_TYPES: ImagegenProviderType[] = ['openai-images', 'openai-chat-image', 'gemini']
 
 export const IMAGEGEN_CONFIG_ENV = 'ONEIMAGE_IMAGE_PROVIDERS'
 export const IMAGEGEN_CONFIG_FILE_ENV = 'ONEIMAGE_IMAGE_PROVIDERS_FILE'
@@ -126,6 +133,14 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
       }
     }
 
+    let mediaOrigin: string | undefined
+    if (p.mediaOrigin !== undefined) {
+      if (typeof p.mediaOrigin === 'string' && /^https?:\/\/[^\s]+$/.test(p.mediaOrigin.trim())) {
+        mediaOrigin = p.mediaOrigin.trim().replace(/\/+$/, '')
+      } else {
+        warnings.push(`${label} (${p.id}): mediaOrigin must be an http(s) URL; ignoring`)
+      }
+    }
     seenIds.add(p.id)
     valid.push({
       id: p.id,
@@ -138,6 +153,7 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
       sizes,
       timeoutMs: effectiveTimeout,
       generationConfig,
+      mediaOrigin,
     })
   })
   return valid
