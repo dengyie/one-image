@@ -138,13 +138,20 @@ if ! $supervisor_ctl restart oneimage; then
   rollback_current
   exit 1
 fi
-# A cold start on this host needs 5-14s before the first HTTP response lands
-# (NFS-backed bundle + SQLite open; measured 6.8s), so a single 5s probe is
+# This host keeps `proxy=http://127.0.0.1:7897` in /root/.curlrc, so every plain
+# curl here — including these loopback probes — is sent through the shared proxy
+# that all other services on the box also use. Under load that leg adds seconds
+# (measured 0.2-0.3s idle, >5s congested) on top of a loopback round trip that
+# is really ~1ms, which is enough to make a healthy release look dead. The app
+# is on 127.0.0.1, so bypass the proxy explicitly and keep the probe honest.
+curl_probe() { curl --noproxy '*' "$@"; }
+# A cold start on this host can take several seconds before the first HTTP
+# response lands (NFS-backed bundle + SQLite open), so a single short probe is
 # guaranteed to misjudge a healthy release. Probe with a bounded retry budget
 # instead, and still fail closed (rollback) when the app never becomes healthy.
 health_code=''
 for attempt in $(seq 1 20); do
-  health_code=$(curl --silent --max-time 10 -o /tmp/oneimage-health.json -w '%{http_code}' "$health_url" 2>/dev/null) || health_code=''
+  health_code=$(curl_probe --silent --max-time 10 -o /tmp/oneimage-health.json -w '%{http_code}' "$health_url" 2>/dev/null) || health_code=''
   if [ "$health_code" = 200 ] || [ "$health_code" = 503 ]; then
     grep -Eq '"status":"(ok|degraded)"' /tmp/oneimage-health.json 2>/dev/null && break
   fi
@@ -154,7 +161,7 @@ case "$health_code" in 200|503) ;; *) rollback_current; exit 1 ;; esac
 grep -Eq '"status":"(ok|degraded)"' /tmp/oneimage-health.json || { rollback_current; exit 1; }
 capabilities_ok=''
 for attempt in $(seq 1 10); do
-  if curl --fail --silent --show-error --max-time 5 "$capabilities_url" >/tmp/oneimage-capabilities.json 2>/dev/null \
+  if curl_probe --fail --silent --show-error --max-time 5 "$capabilities_url" >/tmp/oneimage-capabilities.json 2>/dev/null \
     && grep -q '"maxInputBytes"' /tmp/oneimage-capabilities.json; then
     capabilities_ok=1
     break
