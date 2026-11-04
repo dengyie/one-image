@@ -1,26 +1,54 @@
 import { Agent } from 'undici'
 import type { ImagegenProviderConfig } from './imagegen-config'
+import { sniffBase64Image } from './image-meta'
 
-// Provider adapters for text-to-image. Three upstream dialects cover the
-// requested model families:
 // - "openai-images": POST {baseUrl}/images/generations — OpenAI gpt-image-*,
 //   xAI grok-2-image*, and OpenAI-compatible aggregators (new-api etc., which
-//   also front Gemini/DALL-E style models).
+//   also front Gemini/DALL-E style models). With a reference image the call
+//   moves to POST {baseUrl}/images/edits (multipart).
 // - "openai-chat-image": POST {baseUrl}/chat/completions — models an
 //   aggregator only exposes on its chat surface and that answer with the
 //   produced file inside the message (markdown/`images[]`), e.g. xAI
-//   grok-imagine-* behind new-api.
+//   grok-imagine-* behind new-api. A reference image becomes a multimodal
+//   message part.
 // - "gemini": POST {baseUrl}/v1beta/models/{model}:generateContent — direct
 //   Google Generative Language API image-out models (gemini-2.5-flash-image).
+//   A reference image becomes an `inlineData` part.
+//
+// Image-to-image is only offered for models an operator listed in `editModels`,
+// because a model that does not accept pixels answers with a text refusal
+// or a 5xx only after the upstream was paid for.
 
 export interface GeneratedImage {
   mimeType: string
   base64: string
+  // Read from the returned container, never from the requested `size`: models
+  // routinely ignore it (gpt-image answered 1254×1254 for 1024×1024), and
+  // reporting the request back would be a lie.
+  width?: number
+  height?: number
+}
+
+export interface ImageInput {
+  mimeType: string
+  base64: string
+}
+
+export interface ImagegenParams {
+  model: string
+  prompt: string
+  n: number
+  size?: string
+  // Image-to-image reference. Only models the operator listed in `editModels`
+  // ever receive one; the route rejects the rest before any upstream spend.
+  image?: ImageInput
 }
 
 export interface ImagegenResult {
   images: GeneratedImage[]
   revisedPrompt?: string
+  // Requested images that no fan-out call produced (already counted as spend).
+  failed?: number
 }
 
 export class ImagegenUpstreamError extends Error {
@@ -135,6 +163,11 @@ function clientStatusFor(upstreamStatus: number): number {
 // proxy's own loopback policy — so private origins get their own direct agent.
 const directDispatcher = new Agent()
 
+// Fan-out concurrency for the one-image-per-call dialects. Above this, extra
+// parallel calls add upstream pressure without shortening the wall clock, and
+// n itself is capped at 4 by the route.
+const FANOUT_LIMIT = 3
+
 async function fetchImageBytes(url: URL, provider: ImagegenProviderConfig, signal: AbortSignal, fetchImpl: typeof fetch): Promise<GeneratedImage> {
   // The key stays on the operator's own upstream host; third-party CDN hosts
   // and the media origin get an unauthenticated download.
@@ -151,12 +184,78 @@ async function fetchImageBytes(url: URL, provider: ImagegenProviderConfig, signa
   if (buffer.byteLength > MAX_IMAGE_BYTES) {
     throw new ImagegenUpstreamError('生成结果超过 32MB 上限', 0, 502)
   }
-  return { mimeType: mimeOf(response.headers.get('content-type')), base64: Buffer.from(buffer).toString('base64') }
+  return withImageMeta(Buffer.from(buffer).toString('base64'), mimeOf(response.headers.get('content-type')))
 }
 
 function mimeOf(contentType: string | null | undefined): string {
   const mime = contentType?.split(';')[0]?.trim() ?? ''
   return mime.startsWith('image/') ? mime : 'image/png'
+}
+
+// Every adapter funnels its result through here so the reported size is the
+// size of the bytes we are actually handing back. The container wins over the
+// declared mime as well: `b64_json` has no content-type, and a few upstreams
+// label a JPEG as PNG.
+function withImageMeta(base64: string, declaredMime: string): GeneratedImage {
+  const meta = sniffBase64Image(base64)
+  return {
+    mimeType: meta?.mimeType ?? declaredMime,
+    base64,
+    ...(meta ? { width: meta.width, height: meta.height } : {}),
+  }
+}
+
+/**
+ * Runs `task` for 0..count-1 with at most `limit` in flight and never rejects.
+ * A settled array keeps input order, which matters for multi-image batches.
+ */
+async function mapConcurrent<T>(
+  count: number,
+  limit: number,
+  task: (index: number) => Promise<T>,
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(count)
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = cursor++
+      if (index >= count) return
+      try {
+        results[index] = { status: 'fulfilled', value: await task(index) }
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, count) }, worker))
+  return results
+}
+
+/**
+ * Fan-out for the dialects that produce one file per call. Parallel calls keep
+ * n=4 inside the ~100s edge budget (one slow call would otherwise multiply the
+ * wall clock), and allSettled keeps the successes when one call fails — the
+ * operator already paid for them. `failed` is what is missing from the request,
+ * not the number of rejected calls, so it reads correctly in the UI.
+ */
+async function collectFanOut(
+  count: number,
+  limit: number,
+  task: (index: number) => Promise<GeneratedImage[]>,
+): Promise<ImagegenResult> {
+  const settled = await mapConcurrent(count, limit, task)
+  const images: GeneratedImage[] = []
+  let firstError: unknown
+  for (const result of settled) {
+    if (result.status === 'fulfilled') images.push(...result.value)
+    else firstError ??= result.reason
+  }
+  const capped = images.slice(0, count)
+  if (capped.length === 0) {
+    throw firstError ?? new ImagegenUpstreamError('上游返回中没有图片数据', 0, 502)
+  }
+  const failed = count - capped.length
+  return failed > 0 ? { images: capped, failed } : { images: capped }
 }
 
 // Aggregators that front a self-hosted backend hand back the file URL from
@@ -197,12 +296,53 @@ interface OpenAIImagesResponse {
   error?: { message?: string }
 }
 
-async function generateOpenAIImages(
+async function readOpenAIImagesPayload(response: Response): Promise<OpenAIImagesResponse | null> {
+  return (await response.json().catch(() => null)) as OpenAIImagesResponse | null
+}
+
+function extensionOf(mimeType: string): string {
+  if (mimeType === 'image/jpeg') return 'jpg'
+  if (mimeType === 'image/webp') return 'webp'
+  return 'png'
+}
+
+// Both the generation and the edit surface answer with `data[]`; decoding and
+// the "nothing usable" verdict are shared so the two paths cannot drift.
+async function collectOpenAIImages(
+  payload: OpenAIImagesResponse | null,
   provider: ImagegenProviderConfig,
-  params: { model: string; prompt: string; n: number; size?: string },
   signal: AbortSignal,
   fetchImpl: typeof fetch
 ): Promise<ImagegenResult> {
+  const data = payload?.data
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new ImagegenUpstreamError('上游返回中没有图片数据', 0, 502)
+  }
+  const images: GeneratedImage[] = []
+  for (const item of data) {
+    if (typeof item.b64_json === 'string' && item.b64_json.length > 0) {
+      if (item.b64_json.length > MAX_B64_JSON_LENGTH) {
+        throw new ImagegenUpstreamError('生成结果超过 32MB 上限', 0, 502)
+      }
+      images.push(withImageMeta(item.b64_json, 'image/png'))
+    } else if (typeof item.url === 'string' && item.url.length > 0) {
+      images.push(await fetchImageBytes(resolveMediaUrl(item.url, provider), provider, signal, fetchImpl))
+    }
+  }
+  if (images.length === 0) {
+    throw new ImagegenUpstreamError('上游返回的条目既无 b64_json 也无 url', 0, 502)
+  }
+  const revisedPrompt = data.find((item) => typeof item.revised_prompt === 'string')?.revised_prompt
+  return { images, revisedPrompt: revisedPrompt || undefined }
+}
+
+async function generateOpenAIImages(
+  provider: ImagegenProviderConfig,
+  params: ImagegenParams,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch
+): Promise<ImagegenResult> {
+  if (params.image) return editOpenAIImages(provider, params, params.image, signal, fetchImpl)
   const body: Record<string, unknown> = { model: params.model, prompt: params.prompt, n: params.n }
   if (params.size) body.size = params.size
   const response = await fetchImpl(`${provider.baseUrl}/images/generations`, {
@@ -217,27 +357,38 @@ async function generateOpenAIImages(
   if (!response.ok) {
     throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
   }
-  const payload = (await response.json().catch(() => null)) as OpenAIImagesResponse | null
-  const data = payload?.data
-  if (!Array.isArray(data) || data.length === 0) {
-    throw new ImagegenUpstreamError('上游返回中没有图片数据', 0, 502)
+  return collectOpenAIImages(await readOpenAIImagesPayload(response), provider, signal, fetchImpl)
+}
+
+// The edit surface answers with the same { data: [...] } envelope as
+// generations, but it takes the reference as multipart/form-data. The boundary
+// comes from FormData itself — a hand-written Content-Type would drop it and
+// the upstream would see a single unparseable field.
+async function editOpenAIImages(
+  provider: ImagegenProviderConfig,
+  params: ImagegenParams,
+  image: ImageInput,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch
+): Promise<ImagegenResult> {
+  const form = new FormData()
+  form.set('model', params.model)
+  form.set('prompt', params.prompt)
+  form.set('n', String(params.n))
+  if (params.size) form.set('size', params.size)
+  const bytes = new Uint8Array(Buffer.from(image.base64, 'base64'))
+  form.set('image', new Blob([bytes], { type: image.mimeType }), `reference.${extensionOf(image.mimeType)}`)
+  // Only the key is set by hand: fetch writes the multipart boundary itself.
+  const response = await fetchImpl(`${provider.baseUrl}/images/edits`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${provider.apiKey}` },
+    body: form,
+    signal,
+  })
+  if (!response.ok) {
+    throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
   }
-  const images: GeneratedImage[] = []
-  for (const item of data) {
-    if (typeof item.b64_json === 'string' && item.b64_json.length > 0) {
-      if (item.b64_json.length > MAX_B64_JSON_LENGTH) {
-        throw new ImagegenUpstreamError('生成结果超过 32MB 上限', 0, 502)
-      }
-      images.push({ mimeType: 'image/png', base64: item.b64_json })
-    } else if (typeof item.url === 'string' && item.url.length > 0) {
-      images.push(await fetchImageBytes(resolveMediaUrl(item.url, provider), provider, signal, fetchImpl))
-    }
-  }
-  if (images.length === 0) {
-    throw new ImagegenUpstreamError('上游返回的条目既无 b64_json 也无 url', 0, 502)
-  }
-  const revisedPrompt = data.find((item) => typeof item.revised_prompt === 'string')?.revised_prompt
-  return { images, revisedPrompt: revisedPrompt || undefined }
+  return collectOpenAIImages(await readOpenAIImagesPayload(response), provider, signal, fetchImpl)
 }
 
 interface GeminiResponse {
@@ -251,15 +402,16 @@ interface GeminiResponse {
 
 async function generateGemini(
   provider: ImagegenProviderConfig,
-  params: { model: string; prompt: string; n: number; size?: string },
+  params: ImagegenParams,
   signal: AbortSignal,
   fetchImpl: typeof fetch
 ): Promise<ImagegenResult> {
-  const images: GeneratedImage[] = []
   let revisedText: string | undefined
   // generateContent has no per-request image count; n>1 fans out into
-  // sequential calls so the daily cap stays the single spend control.
-  for (let i = 0; i < params.n; i++) {
+  // parallel calls (bounded by the pool) so n stays inside the edge timeout.
+  const generateOnce = async (): Promise<GeneratedImage[]> => {
+    const parts: Record<string, unknown>[] = [{ text: params.prompt }]
+    if (params.image) parts.push({ inlineData: { mimeType: params.image.mimeType, data: params.image.base64 } })
     const response = await fetchImpl(`${provider.baseUrl}/v1beta/models/${encodeURIComponent(params.model)}:generateContent`, {
       method: 'POST',
       headers: {
@@ -267,7 +419,7 @@ async function generateGemini(
         'x-goog-api-key': provider.apiKey,
       },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: params.prompt }] }],
+        contents: [{ role: 'user', parts }],
         ...(provider.generationConfig ?? {}),
       }),
       signal,
@@ -276,14 +428,12 @@ async function generateGemini(
       throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
     }
     const payload = (await response.json().catch(() => null)) as GeminiResponse | null
-    const parts = payload?.candidates?.[0]?.content?.parts ?? []
+    const out = payload?.candidates?.[0]?.content?.parts ?? []
     let found = false
-    for (const part of parts) {
+    const produced: GeneratedImage[] = []
+    for (const part of out) {
       if (part.inlineData?.data) {
-        images.push({
-          mimeType: part.inlineData.mimeType ?? 'image/png',
-          base64: part.inlineData.data,
-        })
+        produced.push(withImageMeta(part.inlineData.data, part.inlineData.mimeType ?? 'image/png'))
         found = true
       } else if (typeof part.text === 'string' && part.text.length > 0 && !revisedText) {
         revisedText = part.text
@@ -292,15 +442,18 @@ async function generateGemini(
     if (!found) {
       throw new ImagegenUpstreamError('上游返回中没有图片数据（可能被安全策略拦截或模型不支持生图）', 0, 502)
     }
+    return produced
   }
-  return { images, revisedPrompt: revisedText }
+  const result = await collectFanOut(params.n, FANOUT_LIMIT, generateOnce)
+  return { ...result, revisedPrompt: revisedText }
 }
 
 // Aggregators expose some image models only on the chat surface: the request
 // is an ordinary completion and the produced file comes back inside the
 // message, either as markdown/`<img>` in the text or as an `images[]` entry.
-// There is no per-request count and no size parameter, so n>1 fans out
-// sequentially the same way the gemini dialect does.
+// There is no per-request count and no size parameter, and an editing request
+// sends the reference alongside the prompt as a multimodal message, which the
+// same surface accepts.
 const MARKDOWN_IMAGE = /!\[[^\]]*\]\(\s*<?([^)\s>]+)>?\s*\)/g
 const HTML_IMAGE = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi
 
@@ -357,17 +510,28 @@ function decodeDataUrl(ref: string): GeneratedImage {
   if (base64.length > MAX_B64_JSON_LENGTH) {
     throw new ImagegenUpstreamError('生成结果超过 32MB 上限', 0, 502)
   }
-  return { mimeType, base64 }
+  return withImageMeta(base64, mimeType)
+}
+
+export function buildChatUserMessage(params: ImagegenParams): { role: 'user'; content: unknown } {
+  const image = params.image
+  if (!image) return { role: 'user', content: params.prompt }
+  return {
+    role: 'user',
+    content: [
+      { type: 'text', text: params.prompt },
+      { type: 'image_url', image_url: { url: `data:${image.mimeType};base64,${image.base64}` } },
+    ],
+  }
 }
 
 async function generateOpenAIChatImage(
   provider: ImagegenProviderConfig,
-  params: { model: string; prompt: string; n: number },
+  params: ImagegenParams,
   signal: AbortSignal,
   fetchImpl: typeof fetch
 ): Promise<ImagegenResult> {
-  const images: GeneratedImage[] = []
-  for (let i = 0; i < params.n; i++) {
+  const generateOnce = async (): Promise<GeneratedImage[]> => {
     const response = await fetchImpl(`${provider.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -376,7 +540,7 @@ async function generateOpenAIChatImage(
       },
       body: JSON.stringify({
         model: params.model,
-        messages: [{ role: 'user', content: params.prompt }],
+        messages: [buildChatUserMessage(params)],
         stream: false,
       }),
       signal,
@@ -390,25 +554,33 @@ async function generateOpenAIChatImage(
     const message = payload?.choices?.[0]?.message
     const refs = message ? extractChatImageRefs(message) : []
     if (refs.length === 0) {
-      throw new ImagegenUpstreamError('上游返回中没有图片数据（模型可能只回了文字）', 0, 502)
+      throw new ImagegenUpstreamError('上游返回中没有图片数据（模型可能只回了文字或拒绝了参考图）', 0, 502)
     }
+    const produced: GeneratedImage[] = []
     for (const ref of refs) {
-      images.push(ref.startsWith('data:')
+      produced.push(ref.startsWith('data:')
         ? decodeDataUrl(ref)
         : await fetchImageBytes(resolveMediaUrl(ref, provider), provider, signal, fetchImpl))
     }
+    return produced
   }
-  return { images }
+  return collectFanOut(params.n, FANOUT_LIMIT, generateOnce)
 }
 
 export function generateImages(
   provider: ImagegenProviderConfig,
-  params: { model: string; prompt: string; n: number; size?: string },
+  params: ImagegenParams,
   signal: AbortSignal,
   fetchImpl: typeof fetch = fetch
 ): Promise<ImagegenResult> {
   if (!provider.models.includes(params.model)) {
     return Promise.reject(new ImagegenUpstreamError(`模型 ${params.model} 不在该服务的可用列表中`, 0, 400))
+  }
+  // Defence in depth: the route refuses image input for models outside
+  // `editModels`, but an adapter must never quietly send the reference to a
+  // model that was not declared able to accept it.
+  if (params.image && !provider.editModels?.includes(params.model)) {
+    return Promise.reject(new ImagegenUpstreamError(`模型 ${params.model} 不接受参考图`, 0, 400))
   }
   if (provider.type === 'gemini') {
     return generateGemini(provider, params, signal, fetchImpl)

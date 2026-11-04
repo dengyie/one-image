@@ -17,6 +17,10 @@ export interface ImagegenProviderConfig {
   baseUrl: string
   apiKey: string
   models: string[]
+  // Subset of `models` that accepts a reference image (image-to-image). Absent
+  // means no editing surface is advertised at all — the safest default, since
+  // the UI only offers the option for models listed here.
+  editModels?: string[]
   defaultModel?: string
   sizes?: string[]
   timeoutMs?: number
@@ -107,6 +111,22 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
         warnings.push(`${label} (${p.id}): sizes must be a string array; ignoring`)
       }
     }
+    let editModels: string[] | undefined
+    if (p.editModels !== undefined) {
+      if (Array.isArray(p.editModels)) {
+        const accepted = p.editModels.filter(
+          (m): m is string => typeof m === 'string' && models.includes(m.trim()),
+        ).map((m) => m.trim())
+        for (const rejected of p.editModels) {
+          if (typeof rejected !== 'string' || !models.includes(rejected.trim())) {
+            warnings.push(`${label} (${p.id}): editModels entry ${JSON.stringify(rejected)} is not in models; ignored`)
+          }
+        }
+        if (accepted.length > 0) editModels = [...new Set(accepted)]
+      } else {
+        warnings.push(`${label} (${p.id}): editModels must be a string array; ignoring`)
+      }
+    }
     let timeoutMs: number | undefined
     if (p.timeoutMs !== undefined) {
       if (typeof p.timeoutMs === 'number' && p.timeoutMs >= 10_000 && p.timeoutMs <= 180_000) {
@@ -149,6 +169,7 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
       baseUrl: p.baseUrl.replace(/\/+$/, ''),
       apiKey: p.apiKey.trim(),
       models,
+      editModels,
       defaultModel: defaultModel ?? models[0],
       sizes,
       timeoutMs: effectiveTimeout,

@@ -96,6 +96,49 @@ describe('imagegen config loader', () => {
   })
 })
 
+describe('imagegen config editModels', () => {
+  it('keeps a subset of models that accept a reference image', () => {
+    const result = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({
+        providers: [{ ...VALID_PROVIDER, editModels: ['gpt-image-1', 'gpt-image-1'] }],
+      }),
+    })
+    expect(result.warnings).toEqual([])
+    // Deduplicated so the picker offers each model once.
+    expect(result.providers[0].editModels).toEqual(['gpt-image-1'])
+  })
+
+  it('drops entries outside models with a warning instead of widening the surface', () => {
+    const result = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({
+        providers: [{ ...VALID_PROVIDER, editModels: ['gpt-image-1', 'not-configured', 7] }],
+      }),
+    })
+    expect(result.providers[0].editModels).toEqual(['gpt-image-1'])
+    expect(result.warnings.filter((w) => w.includes('editModels entry'))).toHaveLength(2)
+    expect(result.warnings.join('\n')).toContain('not-configured')
+  })
+
+  it('advertises nothing when every entry is rejected or the field is malformed', () => {
+    const rejected = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({ providers: [{ ...VALID_PROVIDER, editModels: ['nope'] }] }),
+    })
+    expect(rejected.providers[0].editModels).toBeUndefined()
+
+    const malformed = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({ providers: [{ ...VALID_PROVIDER, editModels: 'gpt-image-1' }] }),
+    })
+    expect(malformed.providers[0].editModels).toBeUndefined()
+    expect(malformed.warnings.join('\n')).toContain('editModels must be a string array')
+
+    const absent = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({ providers: [VALID_PROVIDER] }),
+    })
+    expect(absent.providers[0].editModels).toBeUndefined()
+    expect(absent.warnings).toEqual([])
+  })
+})
+
 describe('imagegen config warnings', () => {
   it('warns that generationConfig only applies to gemini providers', () => {
     const result = loadImagegenConfig({
