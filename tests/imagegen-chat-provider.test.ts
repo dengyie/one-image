@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  buildChatUserMessage,
   extractChatImageRefs,
   generateImages,
   resolveMediaUrl,
@@ -9,6 +10,24 @@ import { loadImagegenConfig } from '../server/imagegen-config'
 import type { ImagegenProviderConfig } from '../server/imagegen-config'
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01])
+
+/** Minimal PNG header, enough for the server to read the declared pixels. */
+function png(width: number, height: number): Buffer {
+  const header = Buffer.alloc(8 + 8 + 13 + 4)
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header, 0)
+  header.writeUInt32BE(13, 8)
+  header.write('IHDR', 12, 'latin1')
+  header.writeUInt32BE(width, 16)
+  header.writeUInt32BE(height, 20)
+  header[24] = 8
+  header[25] = 6
+  return header
+}
+
+const chatReply = (content: string) => new Response(
+  JSON.stringify({ choices: [{ message: { role: 'assistant', content } }] }),
+  { status: 200, headers: { 'content-type': 'application/json' } }
+)
 
 function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProviderConfig {
   return {
@@ -130,6 +149,110 @@ describe('chat-surface image providers', () => {
     }), { status: 200 })) as unknown as typeof fetch
     await expect(generateImages(provider(), { model: 'grok-imagine-image', prompt: 'p', n: 1 }, AbortSignal.timeout(5000), fetchImpl))
       .rejects.toThrow(/没有图片数据/)
+  })
+})
+
+describe('chat fan-out and partial success', () => {
+  const inline = (bytes: Buffer) => `![image](data:image/png;base64,${bytes.toString('base64')})`
+
+  it('issues n chat calls concurrently instead of one after another', async () => {
+    let inFlight = 0
+    let peak = 0
+    const releases: (() => void)[] = []
+    const fetchImpl = vi.fn(async () => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise<void>((resolve) => releases.push(resolve))
+      inFlight -= 1
+      return chatReply(inline(png(64, 64)))
+    }) as unknown as typeof fetch
+
+    const pending = generateImages(provider(), { model: 'grok-imagine-image', prompt: 'p', n: 3 }, AbortSignal.timeout(5000), fetchImpl)
+    // Every request reaches the barrier before any of them may resolve:
+    // a sequential loop could only ever park one call here.
+    await vi.waitFor(() => expect(releases).toHaveLength(3))
+    expect(peak).toBe(3)
+    for (const release of releases) release()
+    const result = await pending
+    expect(result.images).toHaveLength(3)
+  })
+
+  it('keeps the images that succeeded and reports how many failed', async () => {
+    let call = 0
+    const fetchImpl = vi.fn(async () => {
+      call += 1
+      if (call === 1) return new Response('upstream exploded', { status: 500 })
+      return chatReply(inline(png(64, 64)))
+    }) as unknown as typeof fetch
+    const result = await generateImages(provider(), { model: 'grok-imagine-image', prompt: 'p', n: 3 }, AbortSignal.timeout(5000), fetchImpl)
+    expect(result.images).toHaveLength(2)
+    expect(result.failed).toBe(1)
+  })
+
+  it('rejects only when every call failed', async () => {
+    const fetchImpl = vi.fn(async () => new Response('upstream exploded', { status: 500 })) as unknown as typeof fetch
+    await expect(generateImages(provider(), { model: 'grok-imagine-image', prompt: 'p', n: 3 }, AbortSignal.timeout(5000), fetchImpl))
+      .rejects.toThrow(/upstream exploded/)
+  })
+
+  it('truncates a chatty reply to the requested count', async () => {
+    const two = `${inline(png(32, 32))}\n${inline(png(48, 48))}`
+    const fetchImpl = vi.fn(async () => chatReply(two)) as unknown as typeof fetch
+    const result = await generateImages(provider(), { model: 'grok-imagine-image', prompt: 'p', n: 1 }, AbortSignal.timeout(5000), fetchImpl)
+    expect(result.images).toHaveLength(1)
+    expect(result.failed).toBeUndefined()
+  })
+
+  it('reports the pixels the model actually produced', async () => {
+    const fetchImpl = vi.fn(async () => chatReply(inline(png(768, 1152)))) as unknown as typeof fetch
+    const result = await generateImages(provider(), { model: 'grok-imagine-image', prompt: 'p', n: 1 }, AbortSignal.timeout(5000), fetchImpl)
+    expect(result.images[0].width).toBe(768)
+    expect(result.images[0].height).toBe(1152)
+  })
+})
+
+describe('chat image-to-image', () => {
+  const REFERENCE = png(96, 64)
+
+  it('sends the reference as a multimodal content array', async () => {
+    expect(buildChatUserMessage({ model: 'm', prompt: 'paint it red', n: 1 })).toEqual({ role: 'user', content: 'paint it red' })
+    expect(buildChatUserMessage({
+      model: 'm',
+      prompt: 'paint it red',
+      n: 1,
+      image: { mimeType: 'image/png', base64: 'AAAA' },
+    })).toEqual({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'paint it red' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+      ],
+    })
+  })
+
+  it('carries the declared reference into the request body', async () => {
+    const bodies: string[] = []
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(String(init?.body))
+      return chatReply(`![image](data:image/png;base64,${png(512, 512).toString('base64')})`)
+    }) as unknown as typeof fetch
+    const result = await generateImages(
+      provider({ editModels: ['grok-imagine-image'] }),
+      {
+        model: 'grok-imagine-image',
+        prompt: 'paint it red',
+        n: 1,
+        image: { mimeType: 'image/png', base64: REFERENCE.toString('base64') },
+      },
+      AbortSignal.timeout(5000),
+      fetchImpl
+    )
+    const body = JSON.parse(bodies[0]) as { messages: { content: unknown }[] }
+    expect(body.messages[0].content).toEqual([
+      { type: 'text', text: 'paint it red' },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${REFERENCE.toString('base64')}` } },
+    ])
+    expect(result.images[0].width).toBe(512)
   })
 })
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { validateImageFile } from './application/file-policy'
-import { exportEditor, PREVIEW_MAX_EDGE, resolveRenderDimensions, type DecodedSource } from './application/editor-renderer'
+import { exportEditor, PREVIEW_MAX_EDGE, renderEditor, resolveRenderDimensions, type DecodedSource } from './application/editor-renderer'
 import { createBrowserCanvasFactory, decodeEditorSource } from './infrastructure/editor-canvas'
 import type { OpenImageItem } from './components/editor/ImageListPanel'
 import { MAX_OPEN_IMAGES, findRootIdForSession } from './domain/working-set'
@@ -47,7 +47,8 @@ import { PointerRipples } from './components/ui/PointerRipples'
 import { UserNavCapsule } from './components/navigation/UserNavCapsule'
 import { AuthModal } from './components/auth/AuthModal'
 import { ProfileModal } from './components/auth/ProfileModal'
-import { ImageGenModal } from './components/imagegen/ImageGenModal'
+import { ImageGenModal, type ImageGenOutcome } from './components/imagegen/ImageGenModal'
+import { REFERENCE_MAX_EDGE, type ReferenceSource } from './application/imagegen-input'
 import { fetchImagegenCapabilities } from './infrastructure/imagegen-client'
 import { HistoryDrawer, type UnifiedHistoryItem } from './components/history/HistoryDrawer'
 import {
@@ -88,6 +89,24 @@ function extensionForMime(mime: string): string {
 }
 
 const viewportSize = () => ({ width: window.innerWidth, height: window.innerHeight })
+
+/**
+ * One honest line about a finished batch: the pixels that actually arrived,
+ * whether the model honoured the requested size, and any images that failed
+ * after the upstream had already billed for them.
+ */
+function describeImageGenOutcome(outcome: ImageGenOutcome, count: number): string {
+  const first = outcome.images[0]
+  const pixels = first?.width && first?.height ? `${first.width}×${first.height}` : '尺寸未知'
+  const parts = [`AI 生成完成（${outcome.model}）：${pixels}`]
+  parts.push(count > 1 ? `共 ${count} 张，当前显示最后一张` : '已进入工作台')
+  if (outcome.failed > 0) parts.push(`${outcome.failed} 张失败`)
+  const requested = /^(\d+)x(\d+)$/i.exec(outcome.requestedSize ?? '')
+  if (requested && first?.width && first?.height && (Number(requested[1]) !== first.width || Number(requested[2]) !== first.height)) {
+    parts.push(`模型未按 ${outcome.requestedSize} 出图`)
+  }
+  return parts.join('，')
+}
 
 function generateThumbnailFromSource(source: DecodedSource, maxEdge = 320): string {
   if (typeof document === 'undefined') return ''
@@ -1373,6 +1392,26 @@ export function App() {
     }
   }, [showToast])
 
+  // Reference image for image-to-image: the canvas as the user sees it (crop,
+  // rotation, colour, annotations) rather than the file that came in, capped at
+  // the size the upload pipeline would keep anyway.
+  const getCurrentReference = useCallback(async (): Promise<ReferenceSource | null> => {
+    if (!decodedSource || !currentState) return null
+    const rendered = renderEditor(decodedSource, currentState, factory, REFERENCE_MAX_EDGE)
+    const canvas = rendered.canvas
+    if (canvas.convertToBlob) {
+      return { blob: canvas.convertToBlob({ type: 'image/png' }), mimeType: 'image/png' }
+    }
+    if (!canvas.toBlob) throw new Error('当前浏览器无法导出参考图')
+    const toBlob = canvas.toBlob.bind(canvas)
+    return {
+      blob: new Promise<Blob>((resolve, reject) =>
+        toBlob((blob) => (blob ? resolve(blob) : reject(new Error('参考图渲染失败'))), 'image/png')
+      ),
+      mimeType: 'image/png',
+    }
+  }, [decodedSource, currentState, factory])
+
   // Total local cache size bytes
   const totalStorageBytes = useMemo(() => {
     return localHistoryItems.reduce((acc, cur) => {
@@ -1720,7 +1759,9 @@ export function App() {
       <ImageGenModal
         isOpen={showImageGenModal}
         onClose={() => setShowImageGenModal(false)}
-        onGenerated={(files, model) => {
+        currentImage={file}
+        getCurrentReference={getCurrentReference}
+        onGenerated={(files, outcome) => {
           setShowImageGenModal(false)
           void (async () => {
             // Each opened image pushes the previous one into the undo tree,
@@ -1732,12 +1773,7 @@ export function App() {
                 state: createEditorState(decoded.width, decoded.height),
               }))
             }
-            showToast(
-              files.length > 1
-                ? `AI 生成完成（${model}）：${files.length} 张已入历史，当前显示最后一张`
-                : `AI 生成完成（${model}），已进入工作台`,
-              'success'
-            )
+            showToast(describeImageGenOutcome(outcome, files.length), outcome.failed > 0 ? 'info' : 'success')
           })()
         }}
       />

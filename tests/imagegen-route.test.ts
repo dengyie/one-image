@@ -21,9 +21,9 @@ function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProv
 
 function createApp(
   providers: ImagegenProviderConfig[],
-  options: { dailyCap?: number; rateLimiter?: ReturnType<typeof createRateLimiter>; fetchImpl?: typeof fetch } = {}
+  options: { dailyCap?: number; rateLimiter?: ReturnType<typeof createRateLimiter>; fetchImpl?: typeof fetch; bodyLimit?: number } = {}
 ) {
-  const app = Fastify()
+  const app = Fastify(options.bodyLimit ? { bodyLimit: options.bodyLimit } : {})
   const appDb = initDatabase(':memory:')
   registerImagegenRoutes(app, appDb.db, {
     providers,
@@ -35,6 +35,21 @@ function createApp(
 }
 
 const PNG_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+/** Minimal PNG header, enough for the server to read the declared pixels. */
+function png(width: number, height: number): Buffer {
+  const header = Buffer.alloc(8 + 8 + 13 + 4)
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header, 0)
+  header.writeUInt32BE(13, 8)
+  header.write('IHDR', 12, 'latin1')
+  header.writeUInt32BE(width, 16)
+  header.writeUInt32BE(height, 20)
+  header[24] = 8
+  header[25] = 6
+  return header
+}
+
+const reference = () => png(512, 512).toString('base64')
 
 describe('imagegen routes', () => {
   it('reports unconfigured as 503 and never leaks keys in capabilities', async () => {
@@ -48,7 +63,20 @@ describe('imagegen routes', () => {
     expect(caps.statusCode).toBe(200)
     const body = JSON.parse(caps.body)
     expect(body.enabled).toBe(true)
-    expect(body.providers[0]).toEqual({ id: 'test', name: 'Test Provider', models: ['img-model-1'], defaultModel: 'img-model-1', sizes: [] })
+    expect(body.providers[0]).toEqual({
+      id: 'test',
+      name: 'Test Provider',
+      models: ['img-model-1'],
+      defaultModel: 'img-model-1',
+      sizes: [],
+      editModels: [],
+      timeoutMs: 90_000,
+    })
+    // Timeouts are advertised so the browser can give up with the server; keys
+    // and URLs still never leave.
+    expect(body.providers[0].baseUrl).toBeUndefined()
+    expect(body.providers[0].apiKey).toBeUndefined()
+    expect(caps.body).not.toContain('sk-test')
     expect(caps.body).not.toContain('sk-test')
     expect(caps.body).not.toContain('upstream.example')
     appDb.close()
@@ -270,7 +298,121 @@ describe('imagegen routes', () => {
     appDb.close()
   })
 
-  it('gemini adapter parses inlineData and fans out n sequentially', async () => {
+  it('reports the pixels that arrived and echoes the requested size', async () => {
+    const real = png(1254, 1254).toString('base64')
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: real }] }), { status: 200 }))
+    const { app, appDb } = createApp([provider({ sizes: ['1024x1024'] })], { fetchImpl: fetchImpl as unknown as typeof fetch })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'test', model: 'img-model-1', prompt: 'a cat', size: '1024x1024' },
+    })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    // gpt-image-2.5 really answers 1254×1254 for a 1024x1024 request.
+    expect(body.images[0].width).toBe(1254)
+    expect(body.images[0].height).toBe(1254)
+    expect(body.requestedSize).toBe('1024x1024')
+    expect(body.failed).toBe(0)
+    appDb.close()
+  })
+
+  it('passes a partial fan-out through instead of failing the whole batch', async () => {
+    const real = png(64, 64).toString('base64')
+    let call = 0
+    const fetchImpl = vi.fn().mockImplementation(async () => {
+      call += 1
+      if (call === 1) return new Response('boom', { status: 500 })
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: real } }] } }] }), { status: 200 })
+    })
+    const { app, appDb } = createApp(
+      [provider({ id: 'google', type: 'gemini', baseUrl: 'https://generativelanguage.example', models: ['gemini-2.5-flash-image'] })],
+      { dailyCap: 10, fetchImpl: fetchImpl as unknown as typeof fetch }
+    )
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'google', model: 'gemini-2.5-flash-image', prompt: 'a cat', n: 2 },
+    })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.images).toHaveLength(1)
+    expect(body.failed).toBe(1)
+    appDb.close()
+  })
+
+  it('charges the daily cap per image, not per request', async () => {
+    const real = png(32, 32).toString('base64')
+    const fetchImpl = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ data: [{ b64_json: real }] }), { status: 200 }))
+    const { app, appDb } = createApp([provider()], { dailyCap: 3, fetchImpl: fetchImpl as unknown as typeof fetch })
+    const headers = { 'cf-connecting-ip': '203.0.113.61' }
+    const body = (n: number) => ({ provider: 'test', model: 'img-model-1', prompt: 'p', n })
+
+    const first = await app.inject({ method: 'POST', url: '/api/v1/imagegen', headers, payload: body(2) })
+    expect(first.statusCode).toBe(200)
+    // One image left in the budget, so a two-image request is refused whole.
+    const tooMany = await app.inject({ method: 'POST', url: '/api/v1/imagegen', headers, payload: body(2) })
+    expect(tooMany.statusCode).toBe(429)
+    expect(JSON.parse(tooMany.body).message).toContain('仅剩 1 张')
+    const last = await app.inject({ method: 'POST', url: '/api/v1/imagegen', headers, payload: body(1) })
+    expect(last.statusCode).toBe(200)
+
+    const rows = appDb.db.prepare('SELECT count FROM imagegen_usage').all() as unknown as { count: number }[]
+    expect(rows.reduce((acc, r) => acc + r.count, 0)).toBe(3)
+    appDb.close()
+  })
+
+  it('refuses a bad reference image before the upstream is called', async () => {
+    const real = png(64, 64).toString('base64')
+    const fetchImpl = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ data: [{ b64_json: real }] }), { status: 200 }))
+    const { app, appDb } = createApp([provider({ editModels: ['img-model-1'] })], {
+      dailyCap: 10,
+      bodyLimit: 16 * 1024 * 1024,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    const cases: { image: Record<string, unknown>; error: string }[] = [
+      { image: { mimeType: 'image/gif', base64: reference() }, error: 'invalid_input_image' },
+      // Declared PNG, but the bytes are a JPEG.
+      { image: { mimeType: 'image/png', base64: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64') }, error: 'invalid_input_image' },
+      { image: { mimeType: 'image/png', base64: 'not base64!!' }, error: 'invalid_input_image' },
+      { image: { mimeType: 'image/png', base64: Buffer.alloc(6 * 1024 * 1024 + 1).toString('base64') }, error: 'invalid_input_image' },
+    ]
+    for (const { image, error } of cases) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/imagegen',
+        payload: { provider: 'test', model: 'img-model-1', prompt: 'p', image },
+      })
+      expect(res.statusCode, JSON.stringify(image.mimeType)).toBe(400)
+      expect(JSON.parse(res.body).error).toBe(error)
+    }
+
+    // A model outside editModels never sees the reference either.
+    const unsupported = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'test', model: 'img-model-1', prompt: 'p', image: { mimeType: 'image/png', base64: reference() } },
+    })
+    expect(unsupported.statusCode).toBe(200)
+
+    const { app: plainApp, appDb: plainDb } = createApp([provider()], { dailyCap: 10, fetchImpl: fetchImpl as unknown as typeof fetch })
+    const refused = await plainApp.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'test', model: 'img-model-1', prompt: 'p', image: { mimeType: 'image/png', base64: reference() } },
+    })
+    expect(refused.statusCode).toBe(400)
+    expect(JSON.parse(refused.body).error).toBe('image_input_unsupported')
+
+    // Exactly one request reached the upstream: the accepted edit.
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(String(fetchImpl.mock.calls[0][0])).toBe('https://upstream.example/v1/images/edits')
+    appDb.close()
+    plainDb.close()
+  })
+
+  it('gemini adapter parses inlineData and fans out n', async () => {
     const pngBase64 = Buffer.from(PNG_BYTES).toString('base64')
     let calls = 0
     const fetchImpl = vi.fn().mockImplementation(async () => {

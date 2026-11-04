@@ -8,6 +8,10 @@ export interface ImagegenProviderInfo {
   models: string[]
   defaultModel: string
   sizes: string[]
+  /** Models of this provider that also accept a reference image; [] means none. */
+  editModels: string[]
+  /** Upstream budget the server allows one request, in ms. */
+  timeoutMs: number
 }
 
 export interface ImagegenCapabilities {
@@ -18,6 +22,9 @@ export interface ImagegenCapabilities {
 export interface GeneratedImagePayload {
   mimeType: string
   base64: string
+  /** As decoded from the returned container; absent when the format is unknown. */
+  width?: number
+  height?: number
 }
 
 export interface ImagegenResponse {
@@ -25,7 +32,14 @@ export interface ImagegenResponse {
   model: string
   images: GeneratedImagePayload[]
   revisedPrompt?: string
+  /** The `size` that was asked for, echoed back so the UI can spot a model that ignored it. */
+  requestedSize?: string
+  /** Requested images the upstream did not produce (they still counted against the cap). */
+  failed?: number
 }
+
+/** Not every capabilities payload needs `failed` (older shapes omit it). */
+export const imagegenFailedCount = (data: ImagegenResponse): number => Math.max(0, data.failed ?? 0)
 
 export async function fetchImagegenCapabilities(): Promise<ImagegenCapabilities | null> {
   try {
@@ -37,19 +51,40 @@ export async function fetchImagegenCapabilities(): Promise<ImagegenCapabilities 
   }
 }
 
-export async function generateImage(params: {
+export interface GenerateImageParams {
   provider: string
   model: string
   prompt: string
   size?: string
   n?: number
-}): Promise<{ ok: boolean; data?: ImagegenResponse; message?: string }> {
+  /** Image-to-image reference; only sent for models the server lists in editModels. */
+  image?: { mimeType: string; base64: string }
+  /** Gives up slightly after the server's own upstream budget would. */
+  timeoutMs?: number
+}
+
+export interface GenerateImageOptions {
+  signal?: AbortSignal
+}
+
+export async function generateImage(
+  params: GenerateImageParams,
+  options: GenerateImageOptions = {},
+): Promise<{ ok: boolean; data?: ImagegenResponse; message?: string }> {
+  // Without a client-side deadline the request would hang for as long as the
+  // edge keeps it open (~100s), so the spinner could outlive the server's own
+  // give-up point. The signal is combined with any caller one.
+  const signals = [options.signal, typeof params.timeoutMs === 'number' ? AbortSignal.timeout(params.timeoutMs) : undefined]
+    .filter((s): s is AbortSignal => !!s)
+  const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+  const { timeoutMs: _timeoutMs, ...body } = params
   try {
     const res = await fetch('/api/v1/imagegen', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify(params),
+      body: JSON.stringify(body),
+      signal,
     })
     const data = await res.json().catch(() => null)
     if (!res.ok) {
@@ -57,7 +92,10 @@ export async function generateImage(params: {
     }
     return { ok: true, data: data as ImagegenResponse }
   } catch (err: unknown) {
-    return { ok: false, message: err instanceof Error && err.name === 'TimeoutError' ? '生成超时，请稍后重试' : '网络连接失败' }
+    if (options.signal?.aborted) return { ok: false, message: '已取消生成' }
+    // An aborted fetch rejects with AbortError; a deadline expiry is a TimeoutError.
+    const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
+    return { ok: false, message: timedOut ? '生成超时，请稍后重试' : '网络连接失败' }
   }
 }
 

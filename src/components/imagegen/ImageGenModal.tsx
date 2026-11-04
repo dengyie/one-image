@@ -1,20 +1,51 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { UiIcon } from '../ui/UiIcon'
 import {
   fetchImagegenCapabilities,
   generateImage,
   base64ToFile,
+  imagegenFailedCount,
   type ImagegenCapabilities,
+  type ImagegenResponse,
 } from '../../infrastructure/imagegen-client'
+import {
+  prepareReferenceImage,
+  REFERENCE_MAX_BYTES,
+  REFERENCE_MAX_EDGE,
+  type ReferenceImage,
+  type ReferenceSource,
+} from '../../application/imagegen-input'
+
+/** What the App needs to report honestly once a batch comes back. */
+export interface ImageGenOutcome {
+  model: string
+  images: ImagegenResponse['images']
+  /** Requested images the upstream did not deliver. */
+  failed: number
+  /** The `size` that was asked for, when one was. */
+  requestedSize?: string
+}
 
 interface ImageGenModalProps {
   isOpen: boolean
   onClose: () => void
   /** Called once per generation with every produced image; the App loads them. */
-  onGenerated: (files: File[], model: string) => void
+  onGenerated: (files: File[], outcome: ImageGenOutcome) => void
+  /** The image open in the editor, used as the reference picker's shortcut. */
+  currentImage?: File | null
+  /** Renders the current canvas, edits included. Resolves null when nothing is open. */
+  getCurrentReference?: () => Promise<ReferenceSource | null>
 }
 
-export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, onGenerated }) => {
+const referenceLimitMb = Math.round(REFERENCE_MAX_BYTES / 1024 / 1024)
+
+export const ImageGenModal: React.FC<ImageGenModalProps> = ({
+  isOpen,
+  onClose,
+  onGenerated,
+  currentImage,
+  getCurrentReference,
+}) => {
   const [caps, setCaps] = useState<ImagegenCapabilities | null>(null)
   const [capsLoaded, setCapsLoaded] = useState(false)
   const [providerId, setProviderId] = useState('')
@@ -25,6 +56,12 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [revised, setRevised] = useState<string | null>(null)
+  // null = a plain text-to-image request, which keeps the outgoing body
+  // byte-for-byte identical to the pre-i2i shape.
+  const [reference, setReference] = useState<ReferenceImage | null>(null)
+  const [pickingReference, setPickingReference] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (!isOpen) return
@@ -47,9 +84,22 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
     }
   }, [isOpen])
 
+  // Closing ends the session: abandon an in-flight call and drop the reference
+  // so the next open starts clean.
+  useEffect(() => {
+    if (!isOpen) {
+      abortRef.current?.abort()
+      abortRef.current = null
+      setReference(null)
+      setPickingReference(false)
+      setLoading(false)
+    }
+  }, [isOpen])
+
   if (!isOpen) return null
 
   const provider = caps?.providers.find((p) => p.id === providerId)
+  const supportsEdit = !!provider && provider.editModels.includes(model)
 
   const switchProvider = (id: string) => {
     const next = caps?.providers.find((p) => p.id === id)
@@ -57,7 +107,51 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
     if (next) {
       setModel(next.defaultModel)
       setSize('')
+      // A reference only exists for models that accept one.
+      if (!next.editModels.includes(next.defaultModel)) setReference(null)
     }
+  }
+
+  const switchModel = (next: string) => {
+    setModel(next)
+    if (!provider?.editModels.includes(next)) setReference(null)
+  }
+
+  /** Runs a blob through the downscale/re-encode pipeline and shows it. */
+  const acceptReference = async (source: ReferenceSource) => {
+    setPickingReference(true)
+    setError(null)
+    try {
+      setReference(await prepareReferenceImage(source))
+    } catch (err: unknown) {
+      setReference(null)
+      setError(err instanceof Error ? err.message : '参考图处理失败')
+    } finally {
+      setPickingReference(false)
+    }
+  }
+
+  const useCurrentImage = async () => {
+    // The canvas (with crops and colour edits) wins over the file on disk.
+    const current = await getCurrentReference?.().catch(() => null)
+    if (current) {
+      await acceptReference(current)
+      return
+    }
+    if (currentImage) {
+      await acceptReference({ blob: Promise.resolve(currentImage), mimeType: currentImage.type })
+      return
+    }
+    setError('当前没有可用的图片')
+  }
+
+  const useFile = (file: File | null | undefined) => {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setError('请选择图片文件')
+      return
+    }
+    void acceptReference({ blob: Promise.resolve(file), mimeType: file.type })
   }
 
   const handleGenerate = async () => {
@@ -70,13 +164,23 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
     setLoading(true)
     setError(null)
     setRevised(null)
-    const result = await generateImage({
-      provider: provider.id,
-      model,
-      prompt: cleanPrompt,
-      size: size || undefined,
-      n: count,
-    })
+    // Abort on close, and give up a little after the server's own upstream
+    // budget so its 504 wins the race and the user sees a real reason.
+    const controller = new AbortController()
+    abortRef.current = controller
+    const result = await generateImage(
+      {
+        provider: provider.id,
+        model,
+        prompt: cleanPrompt,
+        size: size || undefined,
+        n: count,
+        image: reference ? { mimeType: reference.mimeType, base64: reference.base64 } : undefined,
+        timeoutMs: provider.timeoutMs + 5_000,
+      },
+      { signal: controller.signal },
+    )
+    abortRef.current = null
     setLoading(false)
     if (!result.ok || !result.data) {
       setError(result.message ?? '生成失败，请稍后重试')
@@ -90,7 +194,12 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
     }
     // One callback for the whole batch: loading N images is the App's job,
     // and a modal-driven setTimeout chain would race the document switcher.
-    onGenerated(files, result.data.model)
+    onGenerated(files, {
+      model: result.data.model,
+      images: result.data.images,
+      failed: imagegenFailedCount(result.data),
+      requestedSize: result.data.requestedSize,
+    })
   }
 
   return (
@@ -134,7 +243,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
                 <span className="text-xs text-zinc-400">模型</span>
                 <select
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  onChange={(e) => switchModel(e.target.value)}
                   className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500/60"
                 >
                   {provider.models.map((m) => (
@@ -144,10 +253,10 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
               </label>
             </div>
 
-            {provider.sizes.length > 0 && (
-              <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 items-start">
+              {provider.sizes.length > 0 ? (
                 <label className="space-y-1.5">
-                  <span className="text-xs text-zinc-400">尺寸</span>
+                  <span className="text-xs text-zinc-400">请求尺寸</span>
                   <select
                     value={size}
                     onChange={(e) => setSize(e.target.value)}
@@ -158,19 +267,90 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
                       <option key={s} value={s}>{s}</option>
                     ))}
                   </select>
+                  <span className="block text-[11px] text-zinc-500 leading-relaxed">部分模型会按自己的比例出图，实际尺寸以生成为准</span>
                 </label>
-                <label className="space-y-1.5">
-                  <span className="text-xs text-zinc-400">张数</span>
-                  <select
-                    value={String(count)}
-                    onChange={(e) => setCount(Number(e.target.value))}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500/60"
-                  >
-                    {[1, 2, 3, 4].map((n) => (
-                      <option key={n} value={n}>{n}</option>
-                    ))}
-                  </select>
-                </label>
+              ) : (
+                <div className="text-[11px] text-zinc-500 leading-relaxed pt-5">尺寸由模型自行决定，出图后会在提示里报告实际像素</div>
+              )}
+              <label className="space-y-1.5">
+                <span className="text-xs text-zinc-400">张数</span>
+                <select
+                  value={String(count)}
+                  onChange={(e) => setCount(Number(e.target.value))}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500/60"
+                >
+                  {[1, 2, 3, 4].map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+                <span className="block text-[11px] text-zinc-500 leading-relaxed">多张会并行请求</span>
+              </label>
+            </div>
+
+            {supportsEdit && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-400">参考图</span>
+                  {reference && (
+                    <button onClick={() => setReference(null)} className="text-[11px] text-zinc-500 hover:text-zinc-200 transition-colors">
+                      移除
+                    </button>
+                  )}
+                </div>
+                <div
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    useFile(e.dataTransfer.files?.[0])
+                  }}
+                  className="rounded-xl border border-dashed border-zinc-700 bg-zinc-800/40 p-3 space-y-2"
+                >
+                  {reference ? (
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={`data:${reference.mimeType};base64,${reference.base64}`}
+                        alt="参考图"
+                        className="w-16 h-16 rounded-lg object-cover bg-zinc-900"
+                      />
+                      <div className="text-[11px] text-zinc-400 leading-relaxed">
+                        {reference.width}×{reference.height} · {Math.max(1, Math.round(reference.bytes / 1024))} KB
+                        <br />
+                        上传前已压到 {REFERENCE_MAX_EDGE}px / {referenceLimitMb}MB 以内
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-zinc-500 leading-relaxed">
+                      拖入一张图作为底图，或直接使用当前画布；会在上传前压到 {REFERENCE_MAX_EDGE}px 以内
+                    </div>
+                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => void useCurrentImage()}
+                      disabled={pickingReference || loading}
+                      className="px-2.5 py-1 rounded-lg bg-zinc-700/70 hover:bg-zinc-700 disabled:opacity-50 text-[11px] text-zinc-100 transition-colors"
+                    >
+                      使用当前图片
+                    </button>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={pickingReference || loading}
+                      className="px-2.5 py-1 rounded-lg bg-zinc-700/70 hover:bg-zinc-700 disabled:opacity-50 text-[11px] text-zinc-100 transition-colors"
+                    >
+                      选择文件
+                    </button>
+                    {pickingReference && <span className="text-[11px] text-zinc-500">处理中…</span>}
+                  </div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      useFile(e.target.files?.[0])
+                      e.target.value = ''
+                    }}
+                  />
+                </div>
               </div>
             )}
 
@@ -204,7 +384,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, o
               {loading ? (
                 <>
                   <UiIcon name="loader" className="w-4 h-4 animate-spin" />
-                  生成中，可能需要 30-90 秒…
+                  生成中，多张会并行请求，通常 30-90 秒…
                 </>
               ) : (
                 <>
