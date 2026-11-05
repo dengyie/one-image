@@ -74,6 +74,10 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     // Sizes stay server-side knowledge of what the upstream accepts; the
     // picker only needs the list of choices.
     sizes: provider.sizes ?? [],
+    // When the upstream ignores every aspect request (some self-hosted
+    // backends always return one fixed ratio), say so instead of showing a
+    // picker that lies.
+    fixedSizeNote: provider.fixedSizeNote ?? null,
     // Which of this provider's models can also take a reference image. Absent
     // means the picker shows no image-to-image affordance at all.
     editModels: provider.editModels ?? [],

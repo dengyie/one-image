@@ -69,6 +69,7 @@ describe('imagegen routes', () => {
       models: ['img-model-1'],
       defaultModel: 'img-model-1',
       sizes: [],
+      fixedSizeNote: null,
       editModels: [],
       timeoutMs: 90_000,
     })
@@ -450,6 +451,57 @@ describe('imagegen routes', () => {
     // generationConfig contents merge verbatim into the body (Google API shape),
     // not nested under a key.
     expect(JSON.parse((init as RequestInit).body as string).responseModalities).toEqual(['TEXT', 'IMAGE'])
+    appDb.close()
+  })
+
+  it('gemini adapter reads the image from a markdown data-URL text part (gateway envelope)', async () => {
+    const pngBase64 = Buffer.from(png(768, 1152)).toString('base64')
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: `![image](data:image/png;base64,${pngBase64})` }] } }],
+      }), { status: 200 }),
+    )
+    const { app, appDb } = createApp([
+      provider({ id: 'google', type: 'gemini', baseUrl: 'https://generativelanguage.example', models: ['gemini-3.1-flash-image'] }),
+    ], { fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'google', model: 'gemini-3.1-flash-image', prompt: '黄昏海滩', n: 1 },
+    })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.images).toHaveLength(1)
+    expect(body.images[0].mimeType).toBe('image/png')
+    expect(body.images[0].width).toBe(768)
+    expect(body.images[0].height).toBe(1152)
+    // One upstream call only: the envelope carried the bytes inline.
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    appDb.close()
+  })
+
+  it('gemini adapter downloads markdown http image refs from text parts', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (input: unknown) => {
+      const url = String(input)
+      if (url.includes(':generateContent')) {
+        return new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'done: ![image](https://media.example/img/abc.jpg)' }] } }],
+        }), { status: 200 })
+      }
+      expect(url).toBe('https://media.example/img/abc.jpg')
+      return new Response(new Uint8Array(png(512, 512)), { status: 200, headers: { 'content-type': 'image/png' } })
+    })
+    const { app, appDb } = createApp([
+      provider({ id: 'google', type: 'gemini', baseUrl: 'https://generativelanguage.example', models: ['gemini-3.1-flash-image'] }),
+    ], { fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'google', model: 'gemini-3.1-flash-image', prompt: '黄昏海滩', n: 1 },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body).images).toHaveLength(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
     appDb.close()
   })
 })

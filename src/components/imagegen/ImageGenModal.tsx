@@ -269,6 +269,11 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
                   </select>
                   <span className="block text-[11px] text-zinc-500 leading-relaxed">部分模型会按自己的比例出图，实际尺寸以生成为准</span>
                 </label>
+              ) : provider.fixedSizeNote ? (
+                <div className="text-[11px] text-zinc-500 leading-relaxed pt-5">
+                  <span className="text-zinc-400">固定比例：</span>{provider.fixedSizeNote}
+                  <span className="block mt-0.5">出图后会在提示里报告实际像素</span>
+                </div>
               ) : (
                 <div className="text-[11px] text-zinc-500 leading-relaxed pt-5">尺寸由模型自行决定，出图后会在提示里报告实际像素</div>
               )}

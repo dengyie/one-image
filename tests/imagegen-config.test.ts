@@ -94,6 +94,23 @@ describe('imagegen config loader', () => {
     })
     expect(result.providers[0].generationConfig).toEqual({ responseModalities: ['TEXT', 'IMAGE'] })
   })
+
+  it('keeps a trimmed fixedSizeNote and drops malformed values', () => {
+    const kept = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({
+        providers: [{ ...VALID_PROVIDER, fixedSizeNote: '  固定 2:3 竖版输出  ' }],
+      }),
+    })
+    expect(kept.providers[0].fixedSizeNote).toBe('固定 2:3 竖版输出')
+
+    const dropped = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({
+        providers: [{ ...VALID_PROVIDER, fixedSizeNote: '   ' }],
+      }),
+    })
+    expect(dropped.providers[0].fixedSizeNote).toBeUndefined()
+    expect(dropped.warnings.join('\n')).toContain('fixedSizeNote')
+  })
 })
 
 describe('imagegen config editModels', () => {
