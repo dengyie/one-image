@@ -43,6 +43,25 @@ export interface ImagegenResponse {
 /** Not every capabilities payload needs `failed` (older shapes omit it). */
 export const imagegenFailedCount = (data: ImagegenResponse): number => Math.max(0, data.failed ?? 0)
 
+/**
+ * Resolves the provider/model pair a reopened modal should start from. Both
+ * halves are validated against the *resolved* provider: a model name that
+ * survived a config change but no longer belongs to the provider it would be
+ * sent with would otherwise turn every generation into a 400 until the page is
+ * reloaded.
+ */
+export function resolveImagegenSelection(
+  providers: ImagegenProviderInfo[],
+  prevProviderId: string,
+  prevModel: string,
+): { providerId: string; model: string } | null {
+  const first = providers[0]
+  if (!first) return null
+  const provider = providers.find((p) => p.id === prevProviderId) ?? first
+  const model = provider.models.includes(prevModel) ? prevModel : (provider.defaultModel ?? provider.models[0])
+  return { providerId: provider.id, model }
+}
+
 export async function fetchImagegenCapabilities(): Promise<ImagegenCapabilities | null> {
   try {
     const res = await fetch('/api/v1/imagegen/capabilities', { credentials: 'include' })

@@ -5,6 +5,7 @@ import {
   generateImage,
   base64ToFile,
   imagegenFailedCount,
+  resolveImagegenSelection,
   type ImagegenCapabilities,
   type ImagegenResponse,
 } from '../../infrastructure/imagegen-client'
@@ -62,6 +63,10 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   const [pickingReference, setPickingReference] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  // Latest selection for the reopen-resolution effect, which intentionally
+  // does not list these as dependencies (it runs once per open).
+  const selectionRef = useRef({ providerId: '', model: '' })
+  selectionRef.current = { providerId, model }
 
   useEffect(() => {
     if (!isOpen) return
@@ -73,9 +78,11 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
       setCaps(result && result.enabled ? result : null)
       setCapsLoaded(true)
       if (result && result.enabled && result.providers.length > 0) {
-        const first = result.providers[0]
-        setProviderId((current) => (result.providers.some((p) => p.id === current) ? current : first.id))
-        setModel((current) => (result.providers.some((p) => p.models.includes(current)) ? current : first.defaultModel))
+        const resolved = resolveImagegenSelection(result.providers, selectionRef.current.providerId, selectionRef.current.model)
+        if (resolved) {
+          setProviderId(resolved.providerId)
+          setModel(resolved.model)
+        }
         setSize('')
       }
     })
