@@ -37,8 +37,9 @@ import { createDocumentSwitcher, resolveSwitchDirection, type SwitchDirection } 
 import {
   checkProvenance,
   createProvenanceInput,
+  describeProvenanceResult,
 } from './infrastructure/provenance-client'
-import type { ProvenanceResult } from './infrastructure/openai-provenance-adapter'
+import type { ProvenanceRouteResponse } from './infrastructure/provenance-client'
 import { CanvasViewport } from './components/editor/CanvasViewport'
 import { TopActionBar } from './components/editor/TopActionBar'
 import { BottomDock, type ActiveTool } from './components/editor/BottomDock'
@@ -204,7 +205,7 @@ export function App() {
   // Provenance state
   const [isCheckingProvenance, setIsCheckingProvenance] = useState(false)
   const [provenanceResult, setProvenanceResult] = useState<{ detected: boolean; note?: string } | null>(null)
-  const [provenanceResultDetail, setProvenanceResultDetail] = useState<ProvenanceResult | null>(null)
+  const [provenanceResultDetail, setProvenanceResultDetail] = useState<ProvenanceRouteResponse | null>(null)
   const [provenanceError, setProvenanceError] = useState<string | null>(null)
 
   // Viewport Camera (Pan & Zoom)
@@ -810,21 +811,8 @@ export function App() {
       const { blob } = await exportImage('image/jpeg', 92)
       const input = createProvenanceInput(blob, file.name)
       const result = await checkProvenance(input)
-      const detected = result.evidence.some((e) => e.outcome === 'detected')
-      const note =
-        result.evidence.length > 0
-          ? result.evidence
-              .map(
-                (e) =>
-                  `${e.signal.toUpperCase()}: ${e.outcome === 'detected' ? '已检出' : '未检出'}${
-                    e.issuer ? ` (${e.issuer})` : ''
-                  }`
-              )
-              .join(' · ')
-          : detected
-          ? '已识别到数字水印或元数据来源标记'
-          : '未检出嵌入式 AI 来源信号'
-      setProvenanceResult({ detected, note })
+      const detected = result.evidence.some((e) => e.outcome === 'detected') || result.localSignals.some((s) => s.kind === 'C2PA')
+      setProvenanceResult({ detected, note: describeProvenanceResult(result, { reencoded: true }) })
       setProvenanceResultDetail(result)
       showToast(detected ? '检出 AI 来源信号' : '未检出 AI 信号', detected ? 'info' : 'success')
     } catch (err) {
@@ -1182,21 +1170,8 @@ export function App() {
         const input = createProvenanceInput(blob, filename)
         const result = await checkProvenance(input)
         setProvenanceResultDetail(result)
-        const detected = result.evidence.some((e) => e.outcome === 'detected')
-        const note =
-          result.evidence.length > 0
-            ? result.evidence
-                .map(
-                  (e) =>
-                    `${e.signal.toUpperCase()}: ${e.outcome === 'detected' ? '已检出' : '未检出'}${
-                      e.issuer ? ` (${e.issuer})` : ''
-                    }`
-                )
-                .join(' · ')
-            : detected
-            ? '已识别到数字水印或元数据来源标记'
-            : '未检出嵌入式 AI 来源信号'
-        setProvenanceResult({ detected, note })
+        const detected = result.evidence.some((e) => e.outcome === 'detected') || result.localSignals.some((s) => s.kind === 'C2PA')
+        setProvenanceResult({ detected, note: describeProvenanceResult(result, { reencoded: target !== 'original' }) })
         showToast(
           detected ? '检出 AI / C2PA 隐形水印信号' : '未检出嵌入式 AI / C2PA 信号',
           detected ? 'info' : 'success'

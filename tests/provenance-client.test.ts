@@ -1,5 +1,48 @@
 import { describe, expect, it, vi } from 'vitest'
-import { checkProvenance, createProvenanceInput, getPublicCapabilities, isProvenanceMimeSupported } from '../src/infrastructure/provenance-client'
+import { checkProvenance, createProvenanceInput, describeProvenanceResult, getPublicCapabilities, isProvenanceMimeSupported, type ProvenanceRouteResponse } from '../src/infrastructure/provenance-client'
+
+function routeResponse(overrides: Partial<ProvenanceRouteResponse> = {}): ProvenanceRouteResponse {
+  return {
+    source: 'openai',
+    checkedAt: '2026-11-06T00:00:00.000Z',
+    evidence: [],
+    actualSize: null,
+    localSignals: [],
+    ...overrides,
+  }
+}
+
+describe('describeProvenanceResult', () => {
+  it('reports a C2PA metadata hit with size, plus the upstream verdicts', () => {
+    const note = describeProvenanceResult(routeResponse({
+      evidence: [{ source: 'openai', signal: 'synthid', outcome: 'detected', checkedAt: '2026-11-06T00:00:00.000Z' }],
+      actualSize: { width: 1024, height: 1024 },
+      localSignals: [{ kind: 'C2PA', location: 'jpeg:APP11', bytes: 6074 }],
+    }))
+    expect(note).toContain('文件内元数据：C2PA/来源清单')
+    expect(note).toContain('SYNTHID官方检测：已检出')
+    expect(note).toContain('实际 1024×1024')
+  })
+
+  it('labels a local fallback as metadata-only instead of implying the image is clean', () => {
+    const note = describeProvenanceResult(routeResponse({ source: 'local', localSignals: [] }))
+    expect(note).toContain('OpenAI 官方检测不可用')
+    expect(note).toContain('不代表无隐形水印')
+  })
+
+  it('warns that a re-encoded canvas export cannot speak for the original file', () => {
+    const note = describeProvenanceResult(routeResponse({ source: 'local' }), { reencoded: true })
+    expect(note).toContain('画布导出件')
+    expect(note).toContain('不代表原文件')
+  })
+
+  it('points at the authoritative portal when everything is clean', () => {
+    const upstreamClean = describeProvenanceResult(routeResponse({
+      evidence: [{ source: 'openai', signal: 'c2pa', outcome: 'not_detected', checkedAt: '2026-11-06T00:00:00.000Z' }],
+    }))
+    expect(upstreamClean).toContain('C2PA官方检测：未检出')
+  })
+})
 
 describe('browser provenance client', () => {
   it('wraps the current edited blob as the file sent for provenance checks', () => {
