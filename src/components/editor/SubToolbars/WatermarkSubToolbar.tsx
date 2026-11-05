@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { UiIcon } from '../../ui/UiIcon'
-import type { ProvenanceResult } from '../../../infrastructure/openai-provenance-adapter'
+import type { ProvenanceRouteResponse } from '../../../infrastructure/provenance-client'
 import type { SmartEraseStage } from '../../../infrastructure/inpaint/smart-erase'
 import type { SmartEraseMode, EraseKind } from '../../../infrastructure/inpaint/auto-route'
 import type { MosaicShape } from './MosaicSubToolbar'
@@ -17,7 +17,7 @@ export interface WatermarkSubToolbarProps {
   onStripMetadata?: () => void
   isStrippingMetadata?: boolean
   isCheckingProvenance: boolean
-  provenanceResult: ProvenanceResult | null
+  provenanceResult: ProvenanceRouteResponse | null
   provenanceError?: string | null
   /** Present when the current state has pending smart-erase regions. */
   hasEraseAiRegions?: boolean
@@ -445,7 +445,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
           {provenanceResult && (
             <div className="flex flex-col gap-1.5 p-2 rounded-xl bg-zinc-800/60 border border-zinc-700/60">
               <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
-                <span>OPENAI / PROVENANCE</span>
+                <span>{provenanceResult.source === 'openai' ? 'OPENAI / PROVENANCE' : '本地信号扫描（官方检测不可用）'}</span>
                 <span>{new Date(provenanceResult.checkedAt).toLocaleTimeString()}</span>
               </div>
               <div className="flex flex-col gap-1">
@@ -468,6 +468,21 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
                       </span>
                     </div>
                   ))
+                )}
+                {provenanceResult.localSignals.map((sig, i) => (
+                  <div key={`local-${i}`} className="flex items-center justify-between text-[11px]">
+                    <span className="font-mono text-zinc-300">
+                      {sig.kind === 'C2PA' ? '文件内 C2PA/来源清单' : `文件内 ${sig.kind} 元数据`}（{sig.location}）
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      PRESENT
+                    </span>
+                  </div>
+                ))}
+                {provenanceResult.actualSize && (
+                  <div className="text-[10px] text-zinc-500 font-mono">
+                    实际尺寸 {provenanceResult.actualSize.width}×{provenanceResult.actualSize.height}
+                  </div>
                 )}
               </div>
             </div>

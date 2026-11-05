@@ -1,14 +1,28 @@
 import type { FastifyInstance } from 'fastify'
 import { createWriteStream, openAsBlob } from 'node:fs'
-import { mkdtemp, open, rm } from 'node:fs/promises'
+import { mkdtemp, open, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import type { ProvenanceResult } from '../src/infrastructure/openai-provenance-adapter'
 import { matchesImageSignature } from '../src/application/file-policy'
 import { MAX_INPUT_BYTES, SUPPORTED_IMAGE_MIME } from '../src/domain/image-input'
+import { sniffImage } from './image-meta'
+import { scanMetadataSignals, type MetadataSignal } from './image-signals'
 
 type ProvenanceCheck = (file: Blob, filename: string, signal?: AbortSignal) => Promise<ProvenanceResult>
+
+/** Response body: the upstream result, enriched with what the raw bytes reveal locally. */
+export interface ProvenanceRouteResponse {
+  /** 'local' means the upstream check never ran (disabled or failed) — evidence is metadata-only. */
+  source: 'openai' | 'local'
+  checkedAt: string
+  evidence: ProvenanceResult['evidence']
+  /** Real container dimensions, independent of whatever the pipeline requested. */
+  actualSize: { width: number; height: number } | null
+  /** Provenance metadata segments still present in the uploaded file (C2PA/EXIF/XMP). */
+  localSignals: MetadataSignal[]
+}
 
 export interface ProvenanceRouteSecurity {
   authorize(request: { headers: Record<string, string | string[] | undefined> }): boolean | Promise<boolean>
@@ -66,8 +80,29 @@ export function registerProvenanceRoute(app: FastifyInstance, check: ProvenanceC
           request.raw.once('aborted', onRequestAborted)
           reply.raw.once('close', onResponseClosed)
           try {
-            const result = await check(file, part.filename, requestAbort.signal)
-            return reply.code(200).send(result)
+            const bytes = await readFile(uploadPath)
+            const meta = sniffImage(bytes)
+            const localSignals = scanMetadataSignals(bytes) ?? []
+            try {
+              const result = await check(file, part.filename, requestAbort.signal)
+              return reply.code(200).send({ ...result, actualSize: meta ? { width: meta.width, height: meta.height } : null, localSignals, source: 'openai' } satisfies ProvenanceRouteResponse)
+            } catch (upstreamError) {
+              // The authoritative check is unavailable; the local metadata scan
+              // still answers a weaker question, so hand that over instead of a
+              // bare error. It cannot prove absence of a watermark (SynthID is
+              // pixel-level), which the client is expected to convey.
+              const error = upstreamError as { code?: string; status?: number }
+              if (error.code === 'request-aborted' || request.raw.aborted || request.raw.destroyed) throw upstreamError
+              if (error.code === 'provider-auth' || error.status === 503) throw upstreamError
+              request.log.warn({ err: upstreamError, code: error.code ?? 'provider-error' }, 'provenance upstream failed; returning local-signal fallback')
+              return reply.code(200).send({
+                source: 'local',
+                checkedAt: new Date().toISOString(),
+                evidence: [],
+                actualSize: meta ? { width: meta.width, height: meta.height } : null,
+                localSignals,
+              } satisfies ProvenanceRouteResponse)
+            }
           } finally {
             request.raw.off('aborted', onRequestAborted)
             reply.raw.off('close', onResponseClosed)

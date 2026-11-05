@@ -10,7 +10,7 @@ import { WatermarkSubToolbar, type WatermarkLayout, type WatermarkEraseType, typ
 import type { SmartEraseStage } from '../../infrastructure/inpaint/smart-erase'
 import type { SmartEraseMode } from '../../infrastructure/inpaint/auto-route'
 import type { Adjustments, TextBgStyle } from '../../domain/editor-state'
-import type { ProvenanceResult } from '../../infrastructure/openai-provenance-adapter'
+import type { ProvenanceRouteResponse } from '../../infrastructure/provenance-client'
 
 export type ActiveTool = 'none' | 'crop' | 'markup' | 'mosaic' | 'text' | 'adjust' | 'watermark' | 'compress'
 
@@ -64,7 +64,7 @@ interface BottomDockProps {
   onCheckProvenanceTarget: (target: 'current' | 'original') => void
   onStripMetadata?: () => void
   isStrippingMetadata?: boolean
-  provenanceResultDetail: ProvenanceResult | null
+  provenanceResultDetail: ProvenanceRouteResponse | null
   provenanceError?: string | null
   hasEraseAiRegions?: boolean
   onRunErase?: (eraseType: WatermarkEraseType) => void

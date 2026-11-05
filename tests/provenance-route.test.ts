@@ -167,17 +167,52 @@ describe('provenance HTTP route', () => {
     await app.close()
   })
 
-  it('preserves provider errors after a fully consumed request', async () => {
+  it('returns a local-signal fallback (200) when the upstream check fails with a transient error', async () => {
     const app = Fastify()
     await app.register(multipart)
     const check = vi.fn().mockRejectedValue(Object.assign(new Error('upstream failed'), { code: 'provider-unavailable', retryable: true }))
+    registerProvenanceRoute(app, check, { authorize: () => true, allow: () => true })
+    // PNG with a caBX C2PA chunk (length 9, data 'manifest\0', CRC placeholder).
+    const png = Buffer.from([...MAGIC_BYTES['image/png'], 0x00, 0x00, 0x00, 0x09, 0x63, 0x61, 0x42, 0x58, 0x6d, 0x61, 0x6e, 0x69, 0x66, 0x65, 0x73, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00])
+    const { boundary, body } = multipartImage('image/png', [...png], 'sample.png')
+
+    const response = await app.inject({ method: 'POST', url: '/api/v1/provenance/openai', headers: { 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: body })
+
+    expect(response.statusCode).toBe(200)
+    const payload = response.json()
+    expect(payload).toMatchObject({ source: 'local', evidence: [], localSignals: [{ kind: 'C2PA', location: 'png:caBX' }] })
+    expect(payload.checkedAt).toBeTruthy()
+    await app.close()
+  })
+
+  it('still fails with provider-auth (key not configured) instead of a misleading local fallback', async () => {
+    const app = Fastify()
+    await app.register(multipart)
+    const check = vi.fn().mockRejectedValue(Object.assign(new Error('missing key'), { code: 'provider-auth', retryable: false, status: 503 }))
     registerProvenanceRoute(app, check, { authorize: () => true, allow: () => true })
     const { boundary, body } = multipartImage('image/png', MAGIC_BYTES['image/png'], 'sample.png')
 
     const response = await app.inject({ method: 'POST', url: '/api/v1/provenance/openai', headers: { 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: body })
 
-    expect(response.statusCode).toBe(503)
-    expect(response.json()).toMatchObject({ error: { code: 'provider-unavailable', retryable: true } })
+    expect(response.statusCode).toBe(502)
+    expect(response.json()).toMatchObject({ error: { code: 'provider-auth' } })
+    await app.close()
+  })
+
+  it('enriches a successful upstream response with actualSize and localSignals', async () => {
+    const app = Fastify()
+    await app.register(multipart)
+    const check = vi.fn().mockResolvedValue({ source: 'openai', checkedAt: '2026-11-06T00:00:00.000Z', evidence: [] })
+    registerProvenanceRoute(app, check, { authorize: () => true, allow: () => true })
+    // Minimal IHDR PNG 3x2.
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02])
+    const { boundary, body } = multipartImage('image/png', [...png], 'sample.png')
+
+    const response = await app.inject({ method: 'POST', url: '/api/v1/provenance/openai', headers: { 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: body })
+
+    expect(response.statusCode).toBe(200)
+    const payload = response.json()
+    expect(payload).toMatchObject({ source: 'openai', actualSize: { width: 3, height: 2 }, localSignals: [] })
     await app.close()
   })
 
