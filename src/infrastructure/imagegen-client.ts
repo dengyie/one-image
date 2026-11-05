@@ -8,6 +8,8 @@ export interface ImagegenProviderInfo {
   models: string[]
   defaultModel: string
   sizes: string[]
+  /** When sizes is empty: the upstream always returns one fixed ratio. */
+  fixedSizeNote: string | null
   /** Models of this provider that also accept a reference image; [] means none. */
   editModels: string[]
   /** Upstream budget the server allows one request, in ms. */

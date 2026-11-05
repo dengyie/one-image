@@ -23,6 +23,10 @@ export interface ImagegenProviderConfig {
   editModels?: string[]
   defaultModel?: string
   sizes?: string[]
+  // Shown in the picker when `sizes` is empty: some upstreams ignore every
+  // aspect request and always return one fixed ratio. Absent/empty means the
+  // UI just omits the size row entirely.
+  fixedSizeNote?: string
   timeoutMs?: number
   // Gemini only: merged verbatim into the generateContent body, e.g.
   // { responseModalities: ["TEXT", "IMAGE"] } for preview models that
@@ -111,6 +115,14 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
         warnings.push(`${label} (${p.id}): sizes must be a string array; ignoring`)
       }
     }
+    let fixedSizeNote: string | undefined
+    if (p.fixedSizeNote !== undefined) {
+      if (typeof p.fixedSizeNote === 'string' && p.fixedSizeNote.trim().length > 0) {
+        fixedSizeNote = p.fixedSizeNote.trim().slice(0, 80)
+      } else {
+        warnings.push(`${label} (${p.id}): fixedSizeNote must be a non-empty string; ignoring`)
+      }
+    }
     let editModels: string[] | undefined
     if (p.editModels !== undefined) {
       if (Array.isArray(p.editModels)) {
@@ -172,6 +184,7 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
       editModels,
       defaultModel: defaultModel ?? models[0],
       sizes,
+      fixedSizeNote,
       timeoutMs: effectiveTimeout,
       generationConfig,
       mediaOrigin,

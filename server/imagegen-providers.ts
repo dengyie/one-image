@@ -431,13 +431,30 @@ async function generateGemini(
     const out = payload?.candidates?.[0]?.content?.parts ?? []
     let found = false
     const produced: GeneratedImage[] = []
+    // Gateways in front of Gemini often unwrap the returned image into a text
+    // part as markdown/HTML around a data: or http(s) URL instead of an
+    // `inlineData` part; collect those refs and resolve them the same way the
+    // chat surface does.
+    const refs: string[] = []
     for (const part of out) {
       if (part.inlineData?.data) {
         produced.push(withImageMeta(part.inlineData.data, part.inlineData.mimeType ?? 'image/png'))
         found = true
-      } else if (typeof part.text === 'string' && part.text.length > 0 && !revisedText) {
-        revisedText = part.text
+      } else if (typeof part.text === 'string' && part.text.length > 0) {
+        const refsInText = extractChatImageRefs({ content: part.text })
+        if (refsInText.length > 0) refs.push(...refsInText)
+        else if (!revisedText) revisedText = part.text
       }
+    }
+    if (!found && refs.length > 0) {
+      for (const ref of refs) {
+        produced.push(
+          ref.startsWith('data:')
+            ? decodeDataUrl(ref)
+            : await fetchImageBytes(resolveMediaUrl(ref, provider), provider, signal, fetchImpl),
+        )
+      }
+      found = produced.length > 0
     }
     if (!found) {
       throw new ImagegenUpstreamError('上游返回中没有图片数据（可能被安全策略拦截或模型不支持生图）', 0, 502)
