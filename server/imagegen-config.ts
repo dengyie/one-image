@@ -123,6 +123,12 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
         warnings.push(`${label} (${p.id}): fixedSizeNote must be a non-empty string; ignoring`)
       }
     }
+    // The note only replaces the picker when `sizes` is empty; with a picker
+    // present it can never be shown, so carrying it would be a silent no-op.
+    if (fixedSizeNote !== undefined && sizes !== undefined && sizes.length > 0) {
+      warnings.push(`${label} (${p.id}): fixedSizeNote is unused because sizes is set; dropping it`)
+      fixedSizeNote = undefined
+    }
     let editModels: string[] | undefined
     if (p.editModels !== undefined) {
       if (Array.isArray(p.editModels)) {

@@ -504,6 +504,90 @@ describe('imagegen routes', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2)
     appDb.close()
   })
+
+  it('gemini envelope caps server-side downloads at the requested count', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (input: unknown) => {
+      if (String(input).includes(':generateContent')) {
+        return new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '![a](https://media.example/a.jpg) ![b](https://media.example/b.jpg)' }] } }],
+        }), { status: 200 })
+      }
+      return new Response(new Uint8Array(png(512, 512)), { status: 200, headers: { 'content-type': 'image/png' } })
+    })
+    const { app, appDb } = createApp([
+      provider({ id: 'google', type: 'gemini', baseUrl: 'https://generativelanguage.example', models: ['gemini-3.1-flash-image'] }),
+    ], { fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'google', model: 'gemini-3.1-flash-image', prompt: '黄昏海滩', n: 1 },
+    })
+    expect(res.statusCode).toBe(200)
+    // One generateContent call plus exactly one media download: the second ref
+    // in the envelope is beyond what the client paid for.
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(res.body).images).toHaveLength(1)
+    appDb.close()
+  })
+
+  it('gemini text-only reply names what the model said instead of a generic 502', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '抱歉，我不能生成这类内容。' }] } }],
+      }), { status: 200 }),
+    )
+    const { app, appDb } = createApp([
+      provider({ id: 'google', type: 'gemini', baseUrl: 'https://generativelanguage.example', models: ['gemini-3.1-flash-image'] }),
+    ], { fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'google', model: 'gemini-3.1-flash-image', prompt: 'p', n: 1 },
+    })
+    expect(res.statusCode).toBe(502)
+    const message = JSON.parse(res.body).message as string
+    expect(message).toContain('上游返回中没有图片数据')
+    expect(message).toContain('抱歉，我不能生成这类内容')
+    appDb.close()
+  })
+
+  it('openai-images caps a chatty upstream at the requested count', async () => {
+    const b64 = Buffer.from(png(256, 256)).toString('base64')
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ data: [{ b64_json: b64 }, { b64_json: b64 }] }), { status: 200 }),
+    )
+    const { app, appDb } = createApp([provider()], { fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'test', model: 'img-model-1', prompt: 'p', n: 1 },
+    })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    // The quota was charged for one image; a second entry from the upstream
+    // must not leak through as a free extra.
+    expect(body.images).toHaveLength(1)
+    expect(body.failed).toBe(0)
+    appDb.close()
+  })
+
+  it('openai-images reports an under-delivering upstream as failed', async () => {
+    const b64 = Buffer.from(png(256, 256)).toString('base64')
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ data: [{ b64_json: b64 }] }), { status: 200 }),
+    )
+    const { app, appDb } = createApp([provider()], { fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'test', model: 'img-model-1', prompt: 'p', n: 2 },
+    })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.images).toHaveLength(1)
+    expect(body.failed).toBe(1)
+    appDb.close()
+  })
 })
 
 describe('imagegen url host guard (IPv6 and false positives)', () => {

@@ -11,9 +11,11 @@ import { sniffBase64Image } from './image-meta'
 //   produced file inside the message (markdown/`images[]`), e.g. xAI
 //   grok-imagine-* behind new-api. A reference image becomes a multimodal
 //   message part.
-// - "gemini": POST {baseUrl}/v1beta/models/{model}:generateContent — direct
-//   Google Generative Language API image-out models (gemini-2.5-flash-image).
-//   A reference image becomes an `inlineData` part.
+// - "gemini": POST {baseUrl}/v1beta/models/{model}:generateContent — Google
+//   Generative Language API image-out models, direct or behind a gateway. A
+//   reference image becomes an `inlineData` part; the reply's image arrives as
+//   an `inlineData` part (native Google) or as a markdown data:/http URL inside
+//   a text part (gateway envelope), and both are accepted.
 //
 // Image-to-image is only offered for models an operator listed in `editModels`,
 // because a model that does not accept pixels answers with a text refusal
@@ -307,10 +309,15 @@ function extensionOf(mimeType: string): string {
 }
 
 // Both the generation and the edit surface answer with `data[]`; decoding and
-// the "nothing usable" verdict are shared so the two paths cannot drift.
+// the "nothing usable" verdict are shared so the two paths cannot drift. The
+// result is capped at the requested count — the quota is charged per requested
+// image, so a chatty upstream returning extra entries must not hand the client
+// more files than it paid for, and an under-delivering one reports `failed`
+// just like the fan-out dialects do.
 async function collectOpenAIImages(
   payload: OpenAIImagesResponse | null,
   provider: ImagegenProviderConfig,
+  n: number,
   signal: AbortSignal,
   fetchImpl: typeof fetch
 ): Promise<ImagegenResult> {
@@ -320,6 +327,7 @@ async function collectOpenAIImages(
   }
   const images: GeneratedImage[] = []
   for (const item of data) {
+    if (images.length >= n) break
     if (typeof item.b64_json === 'string' && item.b64_json.length > 0) {
       if (item.b64_json.length > MAX_B64_JSON_LENGTH) {
         throw new ImagegenUpstreamError('生成结果超过 32MB 上限', 0, 502)
@@ -333,7 +341,12 @@ async function collectOpenAIImages(
     throw new ImagegenUpstreamError('上游返回的条目既无 b64_json 也无 url', 0, 502)
   }
   const revisedPrompt = data.find((item) => typeof item.revised_prompt === 'string')?.revised_prompt
-  return { images, revisedPrompt: revisedPrompt || undefined }
+  const failed = n - images.length
+  return {
+    images,
+    revisedPrompt: revisedPrompt || undefined,
+    ...(failed > 0 ? { failed } : {}),
+  }
 }
 
 async function generateOpenAIImages(
@@ -357,7 +370,7 @@ async function generateOpenAIImages(
   if (!response.ok) {
     throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
   }
-  return collectOpenAIImages(await readOpenAIImagesPayload(response), provider, signal, fetchImpl)
+  return collectOpenAIImages(await readOpenAIImagesPayload(response), provider, params.n, signal, fetchImpl)
 }
 
 // The edit surface answers with the same { data: [...] } envelope as
@@ -388,7 +401,7 @@ async function editOpenAIImages(
   if (!response.ok) {
     throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
   }
-  return collectOpenAIImages(await readOpenAIImagesPayload(response), provider, signal, fetchImpl)
+  return collectOpenAIImages(await readOpenAIImagesPayload(response), provider, params.n, signal, fetchImpl)
 }
 
 interface GeminiResponse {
@@ -447,7 +460,10 @@ async function generateGemini(
       }
     }
     if (!found && refs.length > 0) {
-      for (const ref of refs) {
+      // The quota is charged per requested image, so a prompt-injected or
+      // chatty envelope listing more refs than asked for must not turn into
+      // that many server-side downloads.
+      for (const ref of refs.slice(0, params.n)) {
         produced.push(
           ref.startsWith('data:')
             ? decodeDataUrl(ref)
@@ -457,7 +473,11 @@ async function generateGemini(
       found = produced.length > 0
     }
     if (!found) {
-      throw new ImagegenUpstreamError('上游返回中没有图片数据（可能被安全策略拦截或模型不支持生图）', 0, 502)
+      // Say what the model actually replied: a 200 with text-only parts is how
+      // a missing `responseModalities` config, a safety refusal and an
+      // image-incapable model all look from here.
+      const hint = revisedText ? `：模型回复「${truncate(revisedText, 120)}」` : '（可能被安全策略拦截、缺少 responseModalities 配置或模型不支持生图）'
+      throw new ImagegenUpstreamError(`上游返回中没有图片数据${hint}`, 0, 502)
     }
     return produced
   }
@@ -569,7 +589,7 @@ async function generateOpenAIChatImage(
       | { choices?: { message?: ChatMessage }[]; error?: { message?: string } }
       | null
     const message = payload?.choices?.[0]?.message
-    const refs = message ? extractChatImageRefs(message) : []
+    const refs = (message ? extractChatImageRefs(message) : []).slice(0, params.n)
     if (refs.length === 0) {
       throw new ImagegenUpstreamError('上游返回中没有图片数据（模型可能只回了文字或拒绝了参考图）', 0, 502)
     }

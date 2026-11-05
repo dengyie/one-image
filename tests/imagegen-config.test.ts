@@ -111,6 +111,16 @@ describe('imagegen config loader', () => {
     expect(dropped.providers[0].fixedSizeNote).toBeUndefined()
     expect(dropped.warnings.join('\n')).toContain('fixedSizeNote')
   })
+
+  it('warns and drops a fixedSizeNote that a sizes picker makes unreachable', () => {
+    const result = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({
+        providers: [{ ...VALID_PROVIDER, sizes: ['1024x1024'], fixedSizeNote: '固定 1:1' }],
+      }),
+    })
+    expect(result.providers[0].fixedSizeNote).toBeUndefined()
+    expect(result.warnings.join('\n')).toContain('fixedSizeNote is unused because sizes is set')
+  })
 })
 
 describe('imagegen config editModels', () => {
