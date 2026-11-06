@@ -21,6 +21,13 @@ export interface ImagegenProviderConfig {
   // means no editing surface is advertised at all — the safest default, since
   // the UI only offers the option for models listed here.
   editModels?: string[]
+  // How the reference is carried on the edit surface, for `openai-images`
+  // providers. `multipart` (default) is the OpenAI `images/edits` form; the
+  // xAI upstream instead wants a JSON body with
+  // `image: { url: "data:...", type: "image_url" }`, and a gateway that fronts
+  // it answers multipart with "no channel for this model". Absent means
+  // multipart, so every existing provider is unchanged.
+  editsStyle?: 'multipart' | 'xai-json'
   defaultModel?: string
   sizes?: string[]
   // Shown in the picker when `sizes` is empty: some upstreams ignore every
@@ -145,6 +152,21 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
         warnings.push(`${label} (${p.id}): editModels must be a string array; ignoring`)
       }
     }
+    let editsStyle: 'multipart' | 'xai-json' | undefined
+    if (p.editsStyle !== undefined) {
+      if (p.editsStyle === 'multipart' || p.editsStyle === 'xai-json') {
+        if (p.type !== 'openai-images') {
+          // The edits dialect only feeds the openai-images /images/edits
+          // branch; on other types it would silently do nothing.
+          warnings.push(`${label} (${p.id}): editsStyle 只对 openai-images 类型生效，已忽略`)
+        } else {
+          editsStyle = p.editsStyle
+        }
+      } else {
+        warnings.push(`${label} (${p.id}): editsStyle must be "multipart" or "xai-json"; ignoring`)
+      }
+    }
+
     let timeoutMs: number | undefined
     if (p.timeoutMs !== undefined) {
       if (typeof p.timeoutMs === 'number' && p.timeoutMs >= 10_000 && p.timeoutMs <= 180_000) {
@@ -188,6 +210,7 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
       apiKey: p.apiKey.trim(),
       models,
       editModels,
+      editsStyle,
       defaultModel: defaultModel ?? models[0],
       sizes,
       fixedSizeNote,

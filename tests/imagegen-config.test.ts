@@ -166,6 +166,39 @@ describe('imagegen config editModels', () => {
   })
 })
 
+describe('imagegen config editsStyle', () => {
+  it('accepts xai-json on an openai-images provider', () => {
+    const result = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({ providers: [{ ...VALID_PROVIDER, editsStyle: 'xai-json' }] }),
+    })
+    expect(result.providers[0].editsStyle).toBe('xai-json')
+    expect(result.warnings).toEqual([])
+  })
+
+  it('leaves editsStyle undefined when absent, so the multipart default is unchanged', () => {
+    const result = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({ providers: [VALID_PROVIDER] }),
+    })
+    expect(result.providers[0].editsStyle).toBeUndefined()
+  })
+
+  it('rejects an unknown dialect and ignores the field on non-openai-images types', () => {
+    const unknown = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({ providers: [{ ...VALID_PROVIDER, editsStyle: 'soap' }] }),
+    })
+    expect(unknown.providers[0].editsStyle).toBeUndefined()
+    expect(unknown.warnings.join('\n')).toContain('editsStyle must be "multipart" or "xai-json"')
+
+    const wrongType = loadImagegenConfig({
+      ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({
+        providers: [{ ...VALID_PROVIDER, type: 'gemini', editsStyle: 'xai-json' }],
+      }),
+    })
+    expect(wrongType.providers[0].editsStyle).toBeUndefined()
+    expect(wrongType.warnings.join('\n')).toContain('editsStyle 只对 openai-images 类型生效')
+  })
+})
+
 describe('imagegen config warnings', () => {
   it('warns that generationConfig only applies to gemini providers', () => {
     const result = loadImagegenConfig({
