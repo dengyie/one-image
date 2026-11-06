@@ -374,9 +374,12 @@ async function generateOpenAIImages(
 }
 
 // The edit surface answers with the same { data: [...] } envelope as
-// generations, but it takes the reference as multipart/form-data. The boundary
-// comes from FormData itself — a hand-written Content-Type would drop it and
-// the upstream would see a single unparseable field.
+// generations. The OpenAI form takes the reference as multipart/form-data:
+// the boundary comes from FormData itself, and a hand-written Content-Type
+// would drop it so the upstream would see a single unparseable field. The
+// xAI upstream instead wants a JSON body with the reference as an embedded
+// data URL, and a gateway (new-api) that fronts it answers the multipart form
+// with "no channel for this model" — so the dialect comes from config.
 async function editOpenAIImages(
   provider: ImagegenProviderConfig,
   params: ImagegenParams,
@@ -384,18 +387,39 @@ async function editOpenAIImages(
   signal: AbortSignal,
   fetchImpl: typeof fetch
 ): Promise<ImagegenResult> {
-  const form = new FormData()
-  form.set('model', params.model)
-  form.set('prompt', params.prompt)
-  form.set('n', String(params.n))
-  if (params.size) form.set('size', params.size)
-  const bytes = new Uint8Array(Buffer.from(image.base64, 'base64'))
-  form.set('image', new Blob([bytes], { type: image.mimeType }), `reference.${extensionOf(image.mimeType)}`)
-  // Only the key is set by hand: fetch writes the multipart boundary itself.
-  const response = await fetchImpl(`${provider.baseUrl}/images/edits`, {
+  let body: BodyInit
+  let contentType: string | undefined
+  const endpoint = `${provider.baseUrl}/images/edits`
+  if (provider.editsStyle === 'xai-json') {
+    body = JSON.stringify({
+      model: params.model,
+      prompt: params.prompt,
+      n: params.n,
+      ...(params.size ? { size: params.size } : {}),
+      image: {
+        url: `data:${image.mimeType};base64,${image.base64}`,
+        type: 'image_url',
+      },
+    })
+    contentType = 'application/json'
+  } else {
+    const form = new FormData()
+    form.set('model', params.model)
+    form.set('prompt', params.prompt)
+    form.set('n', String(params.n))
+    if (params.size) form.set('size', params.size)
+    const bytes = new Uint8Array(Buffer.from(image.base64, 'base64'))
+    form.set('image', new Blob([bytes], { type: image.mimeType }), `reference.${extensionOf(image.mimeType)}`)
+    // Only the key is set by hand: fetch writes the multipart boundary itself.
+    body = form
+  }
+  const response = await fetchImpl(endpoint, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${provider.apiKey}` },
-    body: form,
+    headers: {
+      Authorization: `Bearer ${provider.apiKey}`,
+      ...(contentType ? { 'Content-Type': contentType } : {}),
+    },
+    body,
     signal,
   })
   if (!response.ok) {

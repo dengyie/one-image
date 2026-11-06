@@ -108,4 +108,54 @@ describe('openai-images image editing', () => {
     ).rejects.toThrow(/不接受参考图/)
     expect((fetchImpl as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0)
   })
+
+  it('sends the xai-json dialect when configured: JSON body with an embedded data URL', async () => {
+    const calls: { body: unknown; headers: Record<string, string> }[] = []
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        body: init?.body,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+      })
+      // The first call is the edit POST; the second is downloading the URL it
+      // answered with, so only the first one describes the request dialect.
+      return new Response(JSON.stringify({ data: [{ url: 'https://imgen.example/x.jpeg' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    await generateImages(
+      provider({
+        models: ['grok-imagine-image'],
+        defaultModel: 'grok-imagine-image',
+        editModels: ['grok-imagine-image'],
+        editsStyle: 'xai-json',
+      }),
+      {
+        model: 'grok-imagine-image',
+        prompt: 'keep the subject, repaint it',
+        n: 1,
+        size: '1024x1024',
+        image: { mimeType: 'image/png', base64: REFERENCE.toString('base64') },
+      },
+      AbortSignal.timeout(5000),
+      fetchImpl
+    )
+
+    const editCall = calls[0]
+    expect(editCall.headers['Content-Type']).toBe('application/json')
+    const parsed = JSON.parse(String(editCall.body)) as {
+      model: string
+      prompt: string
+      n: number
+      size: string
+      image: { url: string; type: string }
+    }
+    expect(parsed.model).toBe('grok-imagine-image')
+    expect(parsed.prompt).toBe('keep the subject, repaint it')
+    expect(parsed.n).toBe(1)
+    expect(parsed.size).toBe('1024x1024')
+    expect(parsed.image.type).toBe('image_url')
+    expect(parsed.image.url).toBe(`data:image/png;base64,${REFERENCE.toString('base64')}`)
+  })
 })
