@@ -53,7 +53,7 @@ describe('scanMetadataSignals', () => {
       { marker: 0xe1, payload: new Uint8Array([...ascii('Exif\0\0'), ...ascii('MM\x00*\x00\x00\x00\x08')]) },
       { marker: 0xe1, payload: new Uint8Array([...ascii('http://ns.adobe.com/xap/1.0/\0'), ...ascii('<x:xmpmeta/>')]) },
     ])
-    expect(scanMetadataSignals(jpeg)).toEqual([
+    expect(scanMetadataSignals(jpeg)!.signals).toEqual([
       { kind: 'EXIF', location: 'jpeg:APP1', bytes: 2 + 14 },
       { kind: 'XMP', location: 'jpeg:APP1', bytes: 2 + 41 },
     ])
@@ -63,14 +63,14 @@ describe('scanMetadataSignals', () => {
     const jpeg = jpegWithSegments([
       { marker: 0xeb, payload: new Uint8Array([...ascii('JP'), ...ascii('some jumb box data here')]) },
     ])
-    expect(scanMetadataSignals(jpeg)).toEqual([{ kind: 'C2PA', location: 'jpeg:APP11', bytes: 27 }])
+    expect(scanMetadataSignals(jpeg)!.signals).toEqual([{ kind: 'C2PA', location: 'jpeg:APP11', bytes: 27 }])
   })
 
   it('does not mistake an ordinary APP1 for EXIF', () => {
     const jpeg = jpegWithSegments([
       { marker: 0xe1, payload: ascii('ICC_PROFILE\0whatever') },
     ])
-    expect(scanMetadataSignals(jpeg)).toEqual([])
+    expect(scanMetadataSignals(jpeg)!.signals).toEqual([])
   })
 
   it('stops at the JPEG scan marker — metadata after SOS cannot appear', () => {
@@ -79,7 +79,7 @@ describe('scanMetadataSignals', () => {
     const payload = new Uint8Array([...ascii('Exif\0\0'), ...ascii('MM\x00*')])
     parts.push(0xff, 0xe1, (payload.length + 2) >> 8, (payload.length + 2) & 0xff)
     for (const b of payload) parts.push(b)
-    expect(scanMetadataSignals(new Uint8Array(parts))).toEqual([])
+    expect(scanMetadataSignals(new Uint8Array(parts))!.signals).toEqual([])
   })
 
   it('finds EXIF, C2PA and XMP in PNG chunks', () => {
@@ -89,7 +89,7 @@ describe('scanMetadataSignals', () => {
       { type: 'iTXt', data: new Uint8Array([...ascii('xml:com.adobe.xmp\0\0\0\0\0'), ...ascii('<x/>)')]) },
       { type: 'tEXt', data: new Uint8Array([...ascii('Comment\0'), ...ascii('plain note')]) },
     ])
-    expect(scanMetadataSignals(png)).toEqual([
+    expect(scanMetadataSignals(png)!.signals).toEqual([
       { kind: 'EXIF', location: 'png:eXIf', bytes: 8 },
       { kind: 'C2PA', location: 'png:caBX', bytes: 19 },
       { kind: 'XMP', location: 'png:iTXt', bytes: 27 },
@@ -105,7 +105,7 @@ describe('scanMetadataSignals', () => {
       { type: 'XMP ', data: ascii('<x:xmpmeta/>') },
       { type: 'JUMB', data: jumbfPayload },
     ])
-    expect(scanMetadataSignals(webp)).toEqual([
+    expect(scanMetadataSignals(webp)!.signals).toEqual([
       { kind: 'EXIF', location: 'webp:EXIF', bytes: 4 },
       { kind: 'XMP', location: 'webp:XMP', bytes: 12 },
       { kind: 'C2PA', location: 'webp:JUMB(JUMBF)', bytes: 12 },
@@ -113,18 +113,82 @@ describe('scanMetadataSignals', () => {
   })
 
   it('returns [] for a metadata-free container and null for non-images', () => {
-    expect(scanMetadataSignals(pngWithChunks([{ type: 'IDAT', data: ascii('pixels') }]))).toEqual([])
-    expect(scanMetadataSignals(jpegWithSegments([]))).toEqual([])
+    expect(scanMetadataSignals(pngWithChunks([{ type: 'IDAT', data: ascii('pixels') }]))!.signals).toEqual([])
+    expect(scanMetadataSignals(jpegWithSegments([]))!.signals).toEqual([])
     expect(scanMetadataSignals(ascii('plain text, not an image'))).toBeNull()
     expect(scanMetadataSignals(new Uint8Array(0))).toBeNull()
   })
 
   it('survives truncated containers without throwing', () => {
     const png = pngWithChunks([{ type: 'caBX', data: ascii('manifest') }])
-    expect(scanMetadataSignals(png.subarray(0, 14))).toEqual([]) // header only
+    expect(scanMetadataSignals(png.subarray(0, 14))!.signals).toEqual([]) // header only
     const webp = webpWithChunks([{ type: 'EXIF', data: ascii('MM\x00*') }])
-    expect(scanMetadataSignals(webp.subarray(0, 18))).toEqual([]) // chunk header cut off
+    expect(scanMetadataSignals(webp.subarray(0, 18))!.signals).toEqual([]) // chunk header cut off
     const jpeg = jpegWithSegments([{ marker: 0xe1, payload: new Uint8Array([...ascii('Exif\0\0'), ...ascii('tiff')]) }])
-    expect(scanMetadataSignals(jpeg.subarray(0, 12))).toEqual([])
+    expect(scanMetadataSignals(jpeg.subarray(0, 12))!.signals).toEqual([])
+  })
+
+  it('extracts SynthID and trainedAlgorithmicMedia assertions from a PNG caBX payload', () => {
+    // A caBX chunk whose data embeds CBOR text strings, as a real C2PA
+    // manifest would: header 0x78 = major type 3, length 0x38 (56).
+    const cbor = (text: string): Uint8Array => {
+      const bytes = [...ascii(text)]
+      return new Uint8Array([0x78, text.length, ...bytes])
+    }
+    const assertion1 = 'Applied imperceptible SynthID watermark'
+    const assertion2 = 'trainedAlgorithmicMedia'
+    const noise = new Uint8Array([0x12, 0x34, 0x56, 0x78]) // binary between CBOR items
+    const png = pngWithChunks([
+      { type: 'caBX', data: new Uint8Array([...noise, ...cbor(assertion1), ...noise, ...cbor(assertion2)]) },
+    ])
+    const scan = scanMetadataSignals(png)
+    expect(scan).not.toBeNull()
+    expect(scan!.signals).toEqual([{ kind: 'C2PA', location: 'png:caBX', bytes: 4 + 2 + assertion1.length + 4 + 2 + assertion2.length }])
+    expect(scan!.selfDeclared).toEqual([
+      { statement: assertion1, location: 'png:caBX' },
+      { statement: assertion2, location: 'png:caBX' },
+    ])
+  })
+
+  it('extracts assertions from multi-segment JPEG APP11 payloads', () => {
+    const assertion = 'Created by Google Generative AI'
+    // Split the CBOR text string across two APP11 segments: the header in the
+    // first, the string body in the second. Continuation segments start with
+    // the 4-byte JUMBF 8BIM-resource prefix 0x00 'J' 'P' (or a bare 'JP' on
+    // the first segment).
+    const header = new Uint8Array([0x78, assertion.length])
+    const body = ascii(assertion)
+    const jpeg = jpegWithSegments([
+      { marker: 0xeb, payload: new Uint8Array([...ascii('JP'), ...ascii('jumb'), ...header]) },
+      { marker: 0xeb, payload: new Uint8Array([0x00, ...ascii('JP'), ...body]) },
+    ])
+    const scan = scanMetadataSignals(jpeg)
+    expect(scan).not.toBeNull()
+    expect(scan!.signals.length).toBe(2)
+    expect(scan!.selfDeclared).toEqual([{ statement: assertion, location: 'jpeg:APP11' }])
+  })
+
+  it('extracts assertions from a WebP JUMB superbox', () => {
+    const assertion = 'Created by OpenAI'
+    const jumbfPayload = new Uint8Array([...ascii('\x00\x00\x00\x10jumb'), ...new Uint8Array([0x78, assertion.length]), ...ascii(assertion)])
+    const webp = webpWithChunks([{ type: 'JUMB', data: jumbfPayload }])
+    const scan = scanMetadataSignals(webp)
+    expect(scan).not.toBeNull()
+    expect(scan!.selfDeclared).toEqual([{ statement: assertion, location: 'webp:JUMB(JUMBF)' }])
+  })
+
+  it('returns no selfDeclared when C2PA payloads contain no known assertions', () => {
+    const png = pngWithChunks([{ type: 'caBX', data: ascii('manifest without assertion strings, all plain ascii') }])
+    const scan = scanMetadataSignals(png)
+    expect(scan).not.toBeNull()
+    expect(scan!.signals.length).toBe(1)
+    expect(scan!.selfDeclared).toEqual([])
+  })
+
+  it('does not match assertions shorter than 8 bytes or truncated strings', () => {
+    const png = pngWithChunks([{ type: 'caBX', data: new Uint8Array([0x63, 0x61, 0x62, 0x63, 0x64, 0x65]) }]) // 'abcde', length 3 < 8
+    const scan = scanMetadataSignals(png)
+    expect(scan).not.toBeNull()
+    expect(scan!.selfDeclared).toEqual([])
   })
 })

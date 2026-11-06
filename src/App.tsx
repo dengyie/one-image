@@ -811,7 +811,10 @@ export function App() {
       const { blob } = await exportImage('image/jpeg', 92)
       const input = createProvenanceInput(blob, file.name)
       const result = await checkProvenance(input)
-      const detected = result.evidence.some((e) => e.outcome === 'detected') || result.localSignals.some((s) => s.kind === 'C2PA')
+      const detected =
+        result.evidence.some((e) => e.outcome === 'detected') ||
+        result.localSignals.some((s) => s.kind === 'C2PA') ||
+        (result.selfDeclared?.length ?? 0) > 0
       setProvenanceResult({ detected, note: describeProvenanceResult(result, { reencoded: true }) })
       setProvenanceResultDetail(result)
       showToast(detected ? '检出 AI 来源信号' : '未检出 AI 信号', detected ? 'info' : 'success')
@@ -1170,7 +1173,10 @@ export function App() {
         const input = createProvenanceInput(blob, filename)
         const result = await checkProvenance(input)
         setProvenanceResultDetail(result)
-        const detected = result.evidence.some((e) => e.outcome === 'detected') || result.localSignals.some((s) => s.kind === 'C2PA')
+        const detected =
+          result.evidence.some((e) => e.outcome === 'detected') ||
+          result.localSignals.some((s) => s.kind === 'C2PA') ||
+          (result.selfDeclared?.length ?? 0) > 0
         setProvenanceResult({ detected, note: describeProvenanceResult(result, { reencoded: target !== 'original' }) })
         showToast(
           detected ? '检出 AI / C2PA 隐形水印信号' : '未检出嵌入式 AI / C2PA 信号',

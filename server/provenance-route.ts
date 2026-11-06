@@ -8,7 +8,7 @@ import type { ProvenanceResult } from '../src/infrastructure/openai-provenance-a
 import { matchesImageSignature } from '../src/application/file-policy'
 import { MAX_INPUT_BYTES, SUPPORTED_IMAGE_MIME } from '../src/domain/image-input'
 import { sniffImage } from './image-meta'
-import { scanMetadataSignals, type MetadataSignal } from './image-signals'
+import { scanMetadataSignals, type MetadataSignal, type SelfDeclaredSignal } from './image-signals'
 
 type ProvenanceCheck = (file: Blob, filename: string, signal?: AbortSignal) => Promise<ProvenanceResult>
 
@@ -22,6 +22,8 @@ export interface ProvenanceRouteResponse {
   actualSize: { width: number; height: number } | null
   /** Provenance metadata segments still present in the uploaded file (C2PA/EXIF/XMP). */
   localSignals: MetadataSignal[]
+  /** Producer's own written assertions read from C2PA payloads, when present. */
+  selfDeclared: SelfDeclaredSignal[]
 }
 
 export interface ProvenanceRouteSecurity {
@@ -82,10 +84,12 @@ export function registerProvenanceRoute(app: FastifyInstance, check: ProvenanceC
           try {
             const bytes = await readFile(uploadPath)
             const meta = sniffImage(bytes)
-            const localSignals = scanMetadataSignals(bytes) ?? []
+            const scan = scanMetadataSignals(bytes)
+            const localSignals = scan?.signals ?? []
+            const selfDeclared = scan?.selfDeclared ?? []
             try {
               const result = await check(file, part.filename, requestAbort.signal)
-              return reply.code(200).send({ ...result, actualSize: meta ? { width: meta.width, height: meta.height } : null, localSignals, source: 'openai' } satisfies ProvenanceRouteResponse)
+              return reply.code(200).send({ ...result, actualSize: meta ? { width: meta.width, height: meta.height } : null, localSignals, selfDeclared, source: 'openai' } satisfies ProvenanceRouteResponse)
             } catch (upstreamError) {
               // The authoritative check is unavailable; the local metadata scan
               // still answers a weaker question, so hand that over instead of a
@@ -101,6 +105,7 @@ export function registerProvenanceRoute(app: FastifyInstance, check: ProvenanceC
                 evidence: [],
                 actualSize: meta ? { width: meta.width, height: meta.height } : null,
                 localSignals,
+                selfDeclared,
               } satisfies ProvenanceRouteResponse)
             }
           } finally {
