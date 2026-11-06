@@ -21,6 +21,8 @@ export interface ProvenanceRouteResponse {
   actualSize: { width: number; height: number } | null
   /** Provenance metadata segments still present in the uploaded file (C2PA/EXIF/XMP). */
   localSignals: { kind: 'C2PA' | 'EXIF' | 'XMP'; location: string; bytes: number }[]
+  /** Producer's own written assertions read from C2PA payloads, when present. */
+  selfDeclared: { statement: string; location: string }[]
 }
 
 export async function checkProvenance(file: File, fetcher: typeof fetch = fetch): Promise<ProvenanceRouteResponse> {
@@ -56,6 +58,15 @@ export function describeProvenanceResult(result: ProvenanceRouteResponse, option
   const others = result.localSignals.filter((s) => s.kind !== 'C2PA')
   if (result.localSignals.length > 0) {
     parts.push(`文件内元数据：${c2pa ? 'C2PA/来源清单' : others.map((s) => s.kind).join('、')}`)
+  }
+  // The producer naming its own watermarking/generation in the manifest is a
+  // stronger statement than the mere presence of a manifest — surface it.
+  if (result.selfDeclared?.length) {
+    const hasSynthId = result.selfDeclared.some((s) => /synthid/i.test(s.statement))
+    const hasGenerated = result.selfDeclared.some((s) => /trainedalgorithmicmedia|generative ai|openai/i.test(s.statement))
+    if (hasSynthId || hasGenerated) {
+      parts.push(`制作方自我声明：${hasSynthId ? '已应用 SynthID 隐形水印' : ''}${hasSynthId && hasGenerated ? '，' : ''}${hasGenerated ? 'AI 生成内容' : ''}`)
+    }
   }
   if (result.source === 'openai') {
     for (const e of result.evidence) {

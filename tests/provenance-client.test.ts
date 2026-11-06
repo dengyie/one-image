@@ -8,6 +8,7 @@ function routeResponse(overrides: Partial<ProvenanceRouteResponse> = {}): Proven
     evidence: [],
     actualSize: null,
     localSignals: [],
+    selfDeclared: [],
     ...overrides,
   }
 }
@@ -41,6 +42,26 @@ describe('describeProvenanceResult', () => {
       evidence: [{ source: 'openai', signal: 'c2pa', outcome: 'not_detected', checkedAt: '2026-11-06T00:00:00.000Z' }],
     }))
     expect(upstreamClean).toContain('C2PA官方检测：未检出')
+  })
+
+  it('surfaces the producer self-declaration for SynthID and AI-generated assertions', () => {
+    const note = describeProvenanceResult(routeResponse({
+      localSignals: [{ kind: 'C2PA', location: 'jpeg:APP11', bytes: 6074 }],
+      selfDeclared: [
+        { statement: 'Created by Google Generative AI.', location: 'jpeg:APP11' },
+        { statement: 'Applied imperceptible SynthID watermark.', location: 'jpeg:APP11' },
+      ],
+    }))
+    expect(note).toContain('制作方自我声明：已应用 SynthID 隐形水印，AI 生成内容')
+  })
+
+  it('recognizes a trainedAlgorithmicMedia assertion without a SynthID string', () => {
+    const note = describeProvenanceResult(routeResponse({
+      localSignals: [{ kind: 'C2PA', location: 'jpeg:APP11', bytes: 13460 }],
+      selfDeclared: [{ statement: 'http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia', location: 'jpeg:APP11' }],
+    }))
+    expect(note).toContain('制作方自我声明：AI 生成内容')
+    expect(note).not.toContain('SynthID')
   })
 })
 

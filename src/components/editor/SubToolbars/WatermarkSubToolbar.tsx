@@ -479,6 +479,16 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
                     </span>
                   </div>
                 ))}
+                {provenanceResult.selfDeclared?.map((sig, i) => (
+                  <div key={`self-${i}`} className="flex items-center justify-between text-[11px]">
+                    <span className="font-mono text-zinc-300" title={sig.statement}>
+                      制作方声明：{sig.statement.length > 40 ? `${sig.statement.slice(0, 40)}…` : sig.statement}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                      SELF-DECLARED
+                    </span>
+                  </div>
+                ))}
                 {provenanceResult.actualSize && (
                   <div className="text-[10px] text-zinc-500 font-mono">
                     实际尺寸 {provenanceResult.actualSize.width}×{provenanceResult.actualSize.height}
