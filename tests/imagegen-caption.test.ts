@@ -182,6 +182,34 @@ describe('imagegen caption route', () => {
     expect(payload.messages[0].content[1].image_url.url).toContain('data:image/png;base64,')
   })
 
+  it('accepts chat content arrays whose text parts omit the type discriminator', async () => {
+    const chatProvider = withModelSpecs({
+      id: 'mangoapi',
+      name: 'MangoApi 聚合',
+      type: 'openai-images',
+      baseUrl: 'https://upstream.example/v1',
+      apiKey: 'sk-test',
+      models: ['img-model-1', 'vlm-model'],
+      defaultModel: 'img-model-1',
+      captionModel: 'vlm-model',
+      modelSpecs: [
+        { id: 'img-model-1', dialect: 'openai-images', sizes: [], fixedSizeNote: null, edit: false, editsStyle: 'multipart', captionOnly: false, note: null, timeoutMs: 90_000 },
+        { id: 'vlm-model', dialect: 'openai-chat-image', sizes: [], fixedSizeNote: null, edit: false, editsStyle: 'multipart', captionOnly: true, note: null, timeoutMs: 90_000 },
+      ],
+    })
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: [{ text: '一张描述' }, { image_url: { url: 'https://x/y.png' } }] } }],
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch
+    const { app } = createApp([chatProvider], { fetchImpl })
+    const res = await app.inject({ method: 'POST', url: '/api/v1/imagegen/caption', payload: { mimeType: 'image/png', base64: reference() } })
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body).caption).toBe('一张描述')
+  })
+
   it('hides caption-only models from capabilities and refuses to generate with them', async () => {
     const chatProvider = withModelSpecs({
       id: 'mangoapi',

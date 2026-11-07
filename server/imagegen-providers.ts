@@ -901,8 +901,11 @@ function chatMessageText(message: ChatMessage | undefined): string {
   if (!message) return ''
   if (typeof message.content === 'string') return message.content.trim()
   if (Array.isArray(message.content)) {
-    return (message.content as { type?: unknown; text?: unknown }[])
-      .map((part) => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+    // Some gateways omit the `type` discriminator on text parts; any part
+    // carrying a plain text string counts, payload-bearing parts have no
+    // text field to begin with.
+    return (message.content as { text?: unknown }[])
+      .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
       .filter((part) => part.trim().length > 0)
       .join('\n')
       .trim()
