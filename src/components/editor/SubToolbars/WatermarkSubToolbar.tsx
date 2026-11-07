@@ -17,6 +17,9 @@ export interface WatermarkSubToolbarProps {
   onStripMetadata?: () => void
   isStrippingMetadata?: boolean
   isCheckingProvenance: boolean
+  /** 换源重绘（caption → grok 直出）：present only when server offers captioning. */
+  onOpenRegenerate?: () => void
+  isPreparingRegen?: boolean
   provenanceResult: ProvenanceRouteResponse | null
   provenanceError?: string | null
   /** Present when the current state has pending smart-erase regions. */
@@ -78,6 +81,8 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
   onStripMetadata,
   isStrippingMetadata = false,
   isCheckingProvenance,
+  onOpenRegenerate,
+  isPreparingRegen = false,
   provenanceResult,
   provenanceError,
   hasEraseAiRegions = false,
@@ -507,8 +512,20 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
             {isStrippingMetadata ? <span className="animate-spin"><UiIcon name="loader" size={12} /></span> : <UiIcon name="shield-check" size={12} />}
             <span>{isStrippingMetadata ? '正在清理可移除信息…' : '清除可移除的隐形信息'}</span>
           </button>
+          {onOpenRegenerate && (
+            <button
+              type="button"
+              disabled={isPreparingRegen}
+              onClick={() => onOpenRegenerate?.()}
+              title="AI 依据画面描述重新生成一张不带参考图的新图：能通过官方检测，但画面是重绘、不是原图"
+              className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/60 text-zinc-200 text-[11px] transition-all disabled:opacity-50"
+            >
+              {isPreparingRegen ? <span className="animate-spin"><UiIcon name="loader" size={12} /></span> : <UiIcon name="sparkles" size={12} />}
+              <span>{isPreparingRegen ? '正在生成画面描述…' : '换源重绘（新图，可过官方检测）'}</span>
+            </button>
+          )}
           <p className="text-[10px] text-zinc-400 leading-tight">
-            注：检测的是 SynthID 像素频域信号与 C2PA 凭证。清理按钮只移除 EXIF/GPS/XMP/C2PA 容器信息，不重绘像素；SynthID 只能检测，不能在保证原图不变的前提下无损移除。
+            注：检测的是 SynthID 像素频域信号与 C2PA 凭证。清理按钮只移除 EXIF/GPS/XMP/C2PA 容器信息，不重绘像素；SynthID 只能检测，不能在保证原图不变的前提下无损移除。换源重绘产出的新图不带参考图水印，但它是重新绘制的画面而非原图。
           </p>
         </div>
       )}

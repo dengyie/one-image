@@ -146,6 +146,28 @@ describe('stripImageMetadata', () => {
     expect(new DataView(output.buffer).getUint32(4, true)).toBe(output.length - 8)
   })
 
+  it('removes the WebP C2PA JUMB chunk (a RIFF fourcc is four bytes, not five)', async () => {
+    // Regression: the strip branch used to match 'JUMBF' (5 chars), which a
+    // RIFF fourcc can never be, so WebP C2PA boxes survived every cleanup.
+    const chunk = (type: string, payload: Uint8Array) =>
+      concat(encoder.encode(type), le32(payload.length), payload, payload.length % 2 ? new Uint8Array([0]) : new Uint8Array())
+    const jumbfPayload = concat(encoder.encode('JP'), encoder.encode('\x00\x00\x00\x00jumbf-c2pa-manifest'))
+    const vp8xPayload = new Uint8Array([0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    const body = concat(
+      encoder.encode('WEBP'),
+      chunk('VP8X', vp8xPayload),
+      chunk('VP8 ', new Uint8Array([1, 2, 3, 4])),
+      chunk('JUMB', jumbfPayload),
+    )
+    const original = concat(encoder.encode('RIFF'), le32(body.length), body)
+    const cleaned = await stripImageMetadata(blobFromBytes(original, 'image/webp'))
+    const output = await bytes(cleaned.blob)
+    expect(cleaned.removed).toContain('C2PA')
+    expect(includes(output, 'jumbf-c2pa-manifest')).toBe(false)
+    expect(includes(output, 'VP8 ')).toBe(true)
+    expect(new DataView(output.buffer).getUint32(4, true)).toBe(output.length - 8)
+  })
+
   it('returns byte-identical valid output when no removable metadata exists', async () => {
     const first = await stripImageMetadata(blobFromBytes(pngFixture(), 'image/png'))
     const original = await bytes(first.blob)

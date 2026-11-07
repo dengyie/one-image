@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ImagegenProviderConfig, ImagegenModelSpec } from './imagegen-config'
-import { generateImages, ImagegenUpstreamError, type ImageInput } from './imagegen-providers'
+import { captionImage, generateImages, ImagegenUpstreamError, type ImageInput } from './imagegen-providers'
 import { sniffImage } from './image-meta'
 import type { RateLimiter } from './rate-limit'
 import { addUsage, readUsage, resolveUsageClientKey, todayKey } from './usage-ledger'
@@ -62,18 +62,23 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     timeoutMs: spec.timeoutMs,
   })
 
-  // The image surface exists only where at least one model is an image
-  // dialect. A provider carrying exclusively video models must not light up
-  // the image picker (the capabilities would advertise a picker that renders
-  // empty and every generation would 400).
-  const imageProviders = () => providers.filter((p) => p.modelSpecs.some((m) => m.dialect !== 'openai-chat-video'))
+  // The image surface exists only where at least one model is an *pickable*
+  // image dialect. A provider carrying exclusively video (or caption-only)
+  // models must not light up the image picker (the capabilities would
+  // advertise a picker that renders empty and every generation would 400).
+  const imageProviders = () =>
+    providers.filter((p) => p.modelSpecs.some((m) => m.dialect !== 'openai-chat-video' && !m.captionOnly))
 
   const publicProvider = (provider: ImagegenProviderConfig) => {
-    const imageSpecs = provider.modelSpecs.filter((m) => m.dialect !== 'openai-chat-video')
+    // Caption-only models are picker-invisible: they answer text, so a user
+    // selecting one for generation would only buy a guaranteed 400. They stay
+    // in modelSpecs (the caption route reads them) but out of every projection.
+    const imageSpecs = provider.modelSpecs.filter((m) => m.dialect !== 'openai-chat-video' && !m.captionOnly)
+    const captionOnlyIds = new Set(provider.modelSpecs.filter((m) => m.captionOnly).map((m) => m.id))
     return {
       id: provider.id,
       name: provider.name,
-      models: provider.models,
+      models: provider.models.filter((id) => !captionOnlyIds.has(id)),
       // The default must resolve within the image models: a config default
       // pointing at a video id would otherwise leak into the picker contract.
       defaultModel: imageSpecs.some((m) => m.id === provider.defaultModel)
@@ -89,6 +94,9 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
       // Which of this provider's models can also take a reference image. Absent
       // means the picker shows no image-to-image affordance at all.
       editModels: provider.editModels ?? [],
+      // The image→text caption model behind the 换源重绘 prefill. Absent means
+      // the client hides that affordance; no key or URL travels with it.
+      captionModel: provider.captionModel,
       // Per-model capabilities: the image models of this provider with the
       // provider-level fallbacks resolved. Video models are excluded — they are
       // served by the videogen surface below, never by the image picker.
@@ -185,6 +193,11 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (spec.dialect === 'openai-chat-video') {
       return reply.status(400).send({ error: 'invalid_model', message: '该模型不支持图片生成' })
     }
+    // Caption-only models answer text; they serve the 换源重绘 prefill and are
+    // hidden from the picker, so a direct generation attempt is a stale client.
+    if (spec.captionOnly) {
+      return reply.status(400).send({ error: 'invalid_model', message: '该模型仅用于图片描述，不支持生成' })
+    }
     const count = Math.floor(Number(n ?? 1))
     if (!Number.isFinite(count) || count < 1 || count > 4) {
       return reply.status(400).send({ error: 'invalid_n', message: '生成张数需在 1-4 之间' })
@@ -266,6 +279,51 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
         return reply.status(504).send({ error: 'upstream_timeout', message: '生成超时，请稍后重试' })
       }
       return reply.status(502).send({ error: 'upstream_error', message: '生成请求失败，请稍后重试' })
+    }
+  })
+
+  // Image → text caption for the 换源重绘 prefill. Deliberately *not* charged
+  // against the imagegen daily cap: it is a cheap text reply, and billing it
+  // as an image would make the prefill feel like a spend decision. The shared
+  // per-minute limiter is the spend guard.
+  app.post('/api/v1/imagegen/caption', async (request: FastifyRequest<{
+    Body: { mimeType?: string; base64?: string }
+  }>, reply: FastifyReply) => {
+    const captionProviders = providers.filter((p) => p.captionModel)
+    if (captionProviders.length === 0) {
+      return reply.status(503).send({ error: 'caption_unconfigured', message: '图片描述服务未配置' })
+    }
+    if (rateLimiter && !rateLimiter.allow(request)) {
+      return reply.header('Retry-After', '60').status(429).send({
+        error: 'rate_limited',
+        message: '请求过于频繁，请稍后再试',
+      })
+    }
+    const body = request.body || {}
+    const inputImage = readInputImage(body)
+    if ('reason' in inputImage) {
+      return reply.status(400).send({ error: 'invalid_input_image', message: inputImage.reason })
+    }
+    const provider = captionProviders[0]
+    const spec = provider.modelSpecs.find((m) => m.id === provider.captionModel)
+    try {
+      const startedAt = performance.now()
+      const caption = await captionImage(provider, inputImage.image, AbortSignal.timeout(spec?.timeoutMs ?? 30_000), fetchImpl)
+      request.log.info({ provider: provider.id, model: provider.captionModel, ms: Math.round(performance.now() - startedAt), chars: caption.length }, 'imagegen caption completed')
+      return reply.status(200).send({ provider: provider.id, model: provider.captionModel, caption })
+    } catch (err: unknown) {
+      request.log.warn({ err }, 'imagegen caption upstream call failed')
+      if (err instanceof ImagegenUpstreamError) {
+        return reply.status(err.status).send({
+          error: 'upstream_error',
+          upstreamStatus: err.upstreamStatus || undefined,
+          message: err.message,
+        })
+      }
+      if (err instanceof Error && err.name === 'TimeoutError') {
+        return reply.status(504).send({ error: 'upstream_timeout', message: '描述超时，请稍后重试' })
+      }
+      return reply.status(502).send({ error: 'upstream_error', message: '描述请求失败，请稍后重试' })
     }
   })
 }

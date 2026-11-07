@@ -33,6 +33,10 @@ export interface ImagegenModelSpec {
   // `grok-imagine-image-edit` = image-edit capability) while the picker keeps
   // a single entry. Absent: the picker model id is sent on the edit surface.
   editModelId?: string
+  // A caption-only entry (a plain VLM that answers text) serves the 换源重绘
+  // prefill and must never surface in the picker: the image route rejects it,
+  // and the capabilities projection hides it. Absent means false.
+  captionOnly?: boolean
   generationConfig?: Record<string, unknown>
   // Free-form operator hint for the picker: expected latency, quirks.
   note: string | null
@@ -54,6 +58,10 @@ export interface ImagegenProviderConfig {
   // yet, or unusable latency). Stored so the config file documents the whole
   // gateway lineup; exposed nowhere in the capabilities.
   disabledModels: { id: string; reason: string }[]
+  // The model used for image→text captioning (the 换源重绘 prompt prefill).
+  // A caption is a text-only generateContent call, so only a gemini-dialect
+  // model can serve it; validated against `models` below.
+  captionModel?: string
   // Legacy provider-level fields. Still accepted and used as the fallback for
   // string-form model entries; derived fields (`editModels`) stay in sync with
   // the per-model `edit` flags so existing call sites keep working.
@@ -94,6 +102,7 @@ interface RawModelInput {
   edit?: unknown
   editsStyle?: unknown
   editModelId?: unknown
+  captionOnly?: unknown
   generationConfig?: unknown
   note?: unknown
   timeoutMs?: unknown
@@ -351,6 +360,17 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
       }
 
       const timeoutRaw = parseTimeout(m.timeoutMs, `${modelLabel} (${id})`, warnings)
+
+      let captionOnly = m.captionOnly === undefined ? undefined : m.captionOnly === true
+      if (m.captionOnly !== undefined && typeof m.captionOnly !== 'boolean') {
+        warnings.push(`${modelLabel} (${id}): captionOnly must be a boolean; ignoring`)
+        captionOnly = undefined
+      }
+      if (isVideo && captionOnly) {
+        warnings.push(`${modelLabel} (${id}): video models cannot serve captions; ignoring captionOnly`)
+        captionOnly = undefined
+      }
+
       pushSpec(
         {
           id,
@@ -360,6 +380,7 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
           edit,
           editsStyle,
           ...(editModelId ? { editModelId } : {}),
+          ...(captionOnly ? { captionOnly: true } : {}),
           ...(generationConfig ? { generationConfig } : {}),
           note: note ?? null,
           timeoutMs: clampTimeout(timeoutRaw ?? providerTimeoutRaw ?? 90_000),
@@ -390,10 +411,26 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
 
     let defaultModel: string | undefined
     if (p.defaultModel !== undefined) {
-      if (typeof p.defaultModel === 'string' && models.includes(p.defaultModel)) {
+      if (typeof p.defaultModel === 'string' && models.includes(p.defaultModel) && !modelSpecs.find((m) => m.id === p.defaultModel)?.captionOnly) {
         defaultModel = p.defaultModel
       } else {
         warnings.push(`${label} (${p.id}): defaultModel not in models; falling back to the first model`)
+      }
+    }
+
+    // The caption model is described by its own spec's dialect: gemini models
+    // get the native generateContent envelope, everything else the OpenAI chat
+    // envelope. Video models cannot look at images, so they never qualify.
+    let captionModel: string | undefined
+    if (p.captionModel !== undefined) {
+      const candidate = typeof p.captionModel === 'string' ? p.captionModel.trim() : ''
+      const spec = candidate ? modelSpecs.find((m) => m.id === candidate) : undefined
+      if (!spec) {
+        warnings.push(`${label} (${p.id}): captionModel not in models; ignoring`)
+      } else if (spec.dialect === 'openai-chat-video') {
+        warnings.push(`${label} (${p.id}): captionModel 不能是视频模型，已忽略`)
+      } else {
+        captionModel = candidate
       }
     }
 
@@ -451,7 +488,8 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
       disabledModels,
       editModels: editModels.length > 0 ? editModels : undefined,
       editsStyle: providerEditsStyle,
-      defaultModel: defaultModel ?? models[0],
+      captionModel,
+      defaultModel: defaultModel ?? modelSpecs.find((m) => !m.captionOnly)?.id ?? models[0],
       sizes: providerSizes,
       fixedSizeNote: providerNote,
       timeoutMs: clampTimeout(providerTimeoutRaw ?? 90_000),

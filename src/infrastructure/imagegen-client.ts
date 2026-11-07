@@ -28,6 +28,8 @@ export interface ImagegenProviderInfo {
   fixedSizeNote: string | null
   /** Models of this provider that also accept a reference image; [] means none. */
   editModels: string[]
+  /** The image→text caption model behind the 换源重绘 prefill; absent = not offered. */
+  captionModel?: string
   /** The image models with their resolved capabilities (video excluded). */
   modelInfos: ImagegenModelInfo[]
   /** Upstream budget the server allows one request, in ms. */
@@ -275,4 +277,44 @@ export function base64ToFile(image: GeneratedImagePayload, index: number): File 
   const bytes = Uint8Array.from(atob(image.base64), (ch) => ch.charCodeAt(0))
   const ext = image.mimeType.split('/')[1] ?? 'png'
   return new File([bytes], `ai-generated-${Date.now()}-${index + 1}.${ext}`, { type: image.mimeType })
+}
+
+export interface CaptionImageParams {
+  image: { mimeType: string; base64: string }
+  /** Gives up slightly after the server's own upstream budget would. */
+  timeoutMs?: number
+}
+
+/**
+ * Asks the server to describe an image in text. This is the 换源重绘 prefill:
+ * the description feeds a fresh text-to-image generation with *no* reference,
+ * which is the only regeneration route that clears the pixel-level SynthID
+ * trace (the reference-conditioned one keeps it, per the official verdicts).
+ * Never charged against the imagegen daily cap.
+ */
+export async function captionImage(
+  params: CaptionImageParams,
+  options: GenerateImageOptions = {},
+): Promise<{ ok: boolean; data?: { provider: string; model: string; caption: string }; message?: string }> {
+  const signals = [options.signal, typeof params.timeoutMs === 'number' ? AbortSignal.timeout(params.timeoutMs) : undefined]
+    .filter((s): s is AbortSignal => !!s)
+  const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+  try {
+    const res = await fetch('/api/v1/imagegen/caption', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(params.image),
+      signal,
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) {
+      return { ok: false, message: data?.message || `图片描述失败（HTTP ${res.status}）` }
+    }
+    return { ok: true, data: data as { provider: string; model: string; caption: string } }
+  } catch (err: unknown) {
+    if (options.signal?.aborted) return { ok: false, message: '已取消' }
+    const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
+    return { ok: false, message: timedOut ? '描述超时，请稍后重试' : '网络连接失败' }
+  }
 }

@@ -29,6 +29,9 @@ interface TopActionBarProps {
   onOpenImageGen?: () => void
   /** Present only when the server exposes video models. */
   onOpenVideoGen?: () => void
+  /** Present whenever a document is open: the 智能一键去水印 entry. */
+  onOneClickCleanWatermark?: () => void
+  isOneClickCleaning?: boolean
 }
 
 export const TopActionBar: React.FC<TopActionBarProps> = ({
@@ -55,6 +58,8 @@ export const TopActionBar: React.FC<TopActionBarProps> = ({
   onCopyToClipboard,
   onOpenImageGen,
   onOpenVideoGen,
+  onOneClickCleanWatermark,
+  isOneClickCleaning = false,
 }) => {
   const [showExportMenu, setShowExportMenu] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -88,6 +93,18 @@ export const TopActionBar: React.FC<TopActionBarProps> = ({
 
       {/* History buttons */}
       <div className="flex shrink-0 items-center gap-0.5">
+        {onOneClickCleanWatermark && (
+          <button
+            onClick={onOneClickCleanWatermark}
+            disabled={isOneClickCleaning}
+            title="一键去隐形水印（无损清理 C2PA/EXIF/XMP 元数据，并检测像素级水印）"
+            className="p-1.5 rounded-full hover:bg-zinc-800 text-sky-400 hover:text-sky-300 disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+          >
+            <span className={isOneClickCleaning ? 'animate-spin' : undefined}>
+              <UiIcon name={isOneClickCleaning ? 'loader' : 'shield-check'} size={15} />
+            </span>
+          </button>
+        )}
         {onOpenImageGen && (
           <button
             onClick={onOpenImageGen}
