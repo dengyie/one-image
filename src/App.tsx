@@ -49,6 +49,7 @@ import { UserNavCapsule } from './components/navigation/UserNavCapsule'
 import { AuthModal } from './components/auth/AuthModal'
 import { ProfileModal } from './components/auth/ProfileModal'
 import { ImageGenModal, type ImageGenOutcome } from './components/imagegen/ImageGenModal'
+import { VideoGenModal } from './components/imagegen/VideoGenModal'
 import { REFERENCE_MAX_EDGE, type ReferenceSource } from './application/imagegen-input'
 import { fetchImagegenCapabilities } from './infrastructure/imagegen-client'
 import { HistoryDrawer, type UnifiedHistoryItem } from './components/history/HistoryDrawer'
@@ -151,6 +152,10 @@ export function App() {
   // so the entry buttons stay hidden until the operator configures providers.
   const [showImageGenModal, setShowImageGenModal] = useState(false)
   const [imagegenEnabled, setImagegenEnabled] = useState(false)
+  // Video generation rides the same capabilities payload (a `video` section);
+  // it has its own modal and never enters the bitmap workspace.
+  const [showVideoGenModal, setShowVideoGenModal] = useState(false)
+  const [videogenEnabled, setVideogenEnabled] = useState(false)
   // Smart erase (browser-local fillers: diffusion / Gaussian frost / optional MI-GAN)
   const [isSmartErasing, setIsSmartErasing] = useState(false)
   const [smartEraseStage, setSmartEraseStage] = useState<SmartEraseStage | null>(null)
@@ -323,6 +328,7 @@ export function App() {
     const probe = () => {
       void fetchImagegenCapabilities().then((caps) => {
         setImagegenEnabled(Boolean(caps?.enabled && caps.providers.length > 0))
+        setVideogenEnabled(Boolean(caps?.enabled && (caps.video?.providers.length ?? 0) > 0))
       })
     }
     probe()
@@ -1539,6 +1545,7 @@ export function App() {
             dimensions={{ width: decodedSource.width, height: decodedSource.height }}
             zoomPercent={Math.round(zoomScale * 100)}
             onOpenImageGen={imagegenEnabled ? () => setShowImageGenModal(true) : undefined}
+            onOpenVideoGen={videogenEnabled ? () => setShowVideoGenModal(true) : undefined}
             canUndo={canUndoSession(session)}
             canRedo={canRedoSession(session)}
             // Viewport-only movement (pan/zoom live outside the session tree)
@@ -1688,6 +1695,7 @@ export function App() {
           onFileSelect={loadFile}
           error={errorMessage}
           onOpenImageGen={imagegenEnabled ? () => setShowImageGenModal(true) : undefined}
+          onOpenVideoGen={videogenEnabled ? () => setShowVideoGenModal(true) : undefined}
           recentItems={localHistoryItems.map((item) => ({
             id: item.id,
             title: item.title,
@@ -1758,6 +1766,9 @@ export function App() {
           })()
         }}
       />
+
+      {/* AI Video Generation Modal: results play in place, never in the workspace */}
+      <VideoGenModal isOpen={showVideoGenModal} onClose={() => setShowVideoGenModal(false)} />
 
       {/* Auth Modal (Login / Register) */}
       <AuthModal

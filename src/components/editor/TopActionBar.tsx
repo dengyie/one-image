@@ -27,6 +27,8 @@ interface TopActionBarProps {
   onCopyToClipboard: () => void
   /** Present only when the server exposes imagegen providers. */
   onOpenImageGen?: () => void
+  /** Present only when the server exposes video models. */
+  onOpenVideoGen?: () => void
 }
 
 export const TopActionBar: React.FC<TopActionBarProps> = ({
@@ -52,6 +54,7 @@ export const TopActionBar: React.FC<TopActionBarProps> = ({
   onExportFormat,
   onCopyToClipboard,
   onOpenImageGen,
+  onOpenVideoGen,
 }) => {
   const [showExportMenu, setShowExportMenu] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -92,6 +95,15 @@ export const TopActionBar: React.FC<TopActionBarProps> = ({
             className="p-1.5 rounded-full hover:bg-zinc-800 text-emerald-400 hover:text-emerald-300 transition-colors"
           >
             <UiIcon name="sparkles" size={15} />
+          </button>
+        )}
+        {onOpenVideoGen && (
+          <button
+            onClick={onOpenVideoGen}
+            title="AI 视频"
+            className="p-1.5 rounded-full hover:bg-zinc-800 text-emerald-400 hover:text-emerald-300 transition-colors"
+          >
+            <UiIcon name="film" size={15} />
           </button>
         )}
         <button

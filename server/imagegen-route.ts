@@ -1,10 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { DatabaseSync } from 'node:sqlite'
-import type { ImagegenProviderConfig } from './imagegen-config'
+import type { ImagegenProviderConfig, ImagegenModelSpec } from './imagegen-config'
 import { generateImages, ImagegenUpstreamError, type ImageInput } from './imagegen-providers'
 import { sniffImage } from './image-meta'
 import type { RateLimiter } from './rate-limit'
-import { resolveClientKey, type ProxyHeaders } from './client-ip'
+import { addUsage, readUsage, resolveUsageClientKey, todayKey } from './usage-ledger'
 
 export interface ImagegenRouteOptions {
   providers: ImagegenProviderConfig[]
@@ -15,10 +15,6 @@ export interface ImagegenRouteOptions {
   // against distributed spend abuse that a per-IP window cannot stop.
   dailyCap: number
   fetchImpl?: typeof fetch
-}
-
-interface ImagegenUsageRow {
-  count: number
 }
 
 const INPUT_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp'])
@@ -52,19 +48,19 @@ function readInputImage(value: unknown): InputImageResult {
   return { image: { mimeType, base64: clean } }
 }
 
-function todayKey(now: Date): string {
-  // Day bucket in the server's local timezone; a calendar day is the natural
-  // spend-budget unit for a single-operator site.
-  const y = now.getFullYear()
-  const m = String(now.getMonth() + 1).padStart(2, '0')
-  const d = String(now.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
-}
-
 export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, options: ImagegenRouteOptions): void {
   const providers = options.providers
   const rateLimiter = options.rateLimiter
   const fetchImpl = options.fetchImpl ?? fetch
+
+  const publicModelInfo = (spec: ImagegenModelSpec) => ({
+    id: spec.id,
+    sizes: spec.sizes,
+    fixedSizeNote: spec.fixedSizeNote,
+    edit: spec.edit,
+    note: spec.note,
+    timeoutMs: spec.timeoutMs,
+  })
 
   const publicProvider = (provider: ImagegenProviderConfig) => ({
     id: provider.id,
@@ -81,16 +77,56 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     // Which of this provider's models can also take a reference image. Absent
     // means the picker shows no image-to-image affordance at all.
     editModels: provider.editModels ?? [],
+    // Per-model capabilities: the image models of this provider with the
+    // provider-level fallbacks resolved. Video models are excluded — they are
+    // served by the videogen surface below, never by the image picker.
+    modelInfos: provider.modelSpecs
+      .filter((m) => m.dialect !== 'openai-chat-video')
+      .map(publicModelInfo),
     // Lets the browser give up at the same time the server does instead of
     // waiting on the edge.
     timeoutMs: provider.timeoutMs ?? 90_000,
   })
 
+  const videoProviders = () =>
+    providers
+      .map((provider) => {
+        const models = provider.modelSpecs.filter((m) => m.dialect === 'openai-chat-video')
+        if (models.length === 0) return null
+        return {
+          id: provider.id,
+          name: provider.name,
+          models: models.map((m) => ({ id: m.id, note: m.note, timeoutMs: m.timeoutMs })),
+          defaultModel: provider.defaultModel && models.some((m) => m.id === provider.defaultModel)
+            ? provider.defaultModel
+            : models[0].id,
+        }
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+
   app.get('/api/v1/imagegen/capabilities', async (_request: FastifyRequest, reply: FastifyReply) => {
     if (providers.length === 0) {
       return reply.status(503).send({ error: 'imagegen_unconfigured', message: '生图服务未配置' })
     }
-    return reply.status(200).send({ enabled: true, providers: providers.map(publicProvider) })
+    const video = videoProviders()
+    return reply.status(200).send({
+      enabled: true,
+      providers: providers.map(publicProvider),
+      ...(video.length > 0 ? { video: { providers: video } } : {}),
+    })
+  })
+
+  // The usage ledger is otherwise write-only from the browser's point of view;
+  // exposing the remaining budget lets the picker say "今日剩余 N 张" instead
+  // of teaching the quota through a 429. A plain read, no rate limiter needed.
+  app.get('/api/v1/imagegen/quota', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (providers.length === 0) {
+      return reply.status(503).send({ error: 'imagegen_unconfigured', message: '生图服务未配置' })
+    }
+    const clientKey = resolveUsageClientKey(request)
+    const day = todayKey(new Date())
+    const used = readUsage(db, 'imagegen_usage', clientKey, day)
+    return reply.status(200).send({ used, cap: options.dailyCap, remaining: Math.max(0, options.dailyCap - used) })
   })
 
   app.post('/api/v1/imagegen', async (request: FastifyRequest<{
@@ -129,8 +165,14 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (!provider) {
       return reply.status(400).send({ error: 'invalid_provider', message: '未知的生图服务' })
     }
-    if (!provider.models.includes(model)) {
+    const spec = provider.modelSpecs.find((m) => m.id === model)
+    if (!spec) {
       return reply.status(400).send({ error: 'invalid_model', message: '该服务下没有这个模型' })
+    }
+    // Video models live on their own surface; the image route must not accept
+    // them even though they are declared under the same provider.
+    if (spec.dialect === 'openai-chat-video') {
+      return reply.status(400).send({ error: 'invalid_model', message: '该模型不支持图片生成' })
     }
     const count = Math.floor(Number(n ?? 1))
     if (!Number.isFinite(count) || count < 1 || count > 4) {
@@ -138,8 +180,8 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     }
     let cleanSize: string | undefined
     if (typeof size === 'string' && size.trim().length > 0) {
-      if (!provider.sizes?.includes(size.trim())) {
-        return reply.status(400).send({ error: 'invalid_size', message: '该服务不支持这个尺寸' })
+      if (!spec.sizes.includes(size.trim())) {
+        return reply.status(400).send({ error: 'invalid_size', message: '该模型不支持这个尺寸' })
       }
       cleanSize = size.trim()
     }
@@ -148,21 +190,16 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
       return reply.status(400).send({ error: 'invalid_input_image', message: inputImage.reason })
     }
     const image = inputImage?.image
-    if (image && !provider.editModels?.includes(model)) {
+    if (image && !spec.edit) {
       return reply.status(400).send({ error: 'image_input_unsupported', message: '该模型不接受参考图' })
     }
 
     // Durable daily cap keyed on the resolved client address, counted in
     // *images* rather than requests: n=4 spends four upstream generations and
     // is billed as four, so one 4-image request must not cost a single unit.
-    // Counted before the upstream call so a slow or failing upstream cannot be
-    // used to race the budget; a failed generation still counts, which keeps
-    // the failure path from being cheaper than the abuse path. The
-    // read-check-increment runs without an await in between, so on this
-    // single-writer SQLite it is atomic per event-loop turn.
-    const clientKey = resolveClientKey(request.headers as ProxyHeaders, request.raw.socket.remoteAddress)
+    const clientKey = resolveUsageClientKey(request)
     const day = todayKey(new Date())
-    const used = (db.prepare('SELECT count FROM imagegen_usage WHERE client_key = ? AND day = ?').get(clientKey, day) as unknown as ImagegenUsageRow | undefined)?.count ?? 0
+    const used = readUsage(db, 'imagegen_usage', clientKey, day)
     if (used >= options.dailyCap) {
       return reply.status(429).send({
         error: 'daily_cap_exceeded',
@@ -175,18 +212,14 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
         message: `今日仅剩 ${options.dailyCap - used} 张生成额度，请减少张数后重试`,
       })
     }
-    db.prepare(
-      'INSERT INTO imagegen_usage (client_key, day, count) VALUES (?, ?, ?) ON CONFLICT(client_key, day) DO UPDATE SET count = count + excluded.count'
-    ).run(clientKey, day, count)
-    // Housekeeping: yesterday's buckets are dead weight once the day rolled.
-    db.prepare('DELETE FROM imagegen_usage WHERE day < ?').run(day)
+    addUsage(db, 'imagegen_usage', clientKey, day, count)
 
     try {
       const startedAt = performance.now()
       const result = await generateImages(
         provider,
         { model, prompt: cleanPrompt, n: count, size: cleanSize, image },
-        AbortSignal.timeout(provider.timeoutMs ?? 90_000),
+        AbortSignal.timeout(spec.timeoutMs),
         fetchImpl
       )
       // Latency per request is what tells the operator whether the edge budget
