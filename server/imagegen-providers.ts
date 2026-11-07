@@ -492,9 +492,13 @@ async function editOpenAIImages(
   let body: BodyInit
   let contentType: string | undefined
   const endpoint = `${provider.baseUrl}/images/edits`
+  // Backends that split generation vs editing by capability-named models
+  // receive the declared edit-surface name here; the picker model id stays
+  // what the user selected and what the route billed against.
+  const upstreamModel = spec.editModelId ?? params.model
   if (spec.editsStyle === 'xai-json') {
     body = JSON.stringify({
-      model: params.model,
+      model: upstreamModel,
       prompt: params.prompt,
       n: params.n,
       ...(params.size ? { size: params.size } : {}),
@@ -506,7 +510,7 @@ async function editOpenAIImages(
     contentType = 'application/json'
   } else {
     const form = new FormData()
-    form.set('model', params.model)
+    form.set('model', upstreamModel)
     form.set('prompt', params.prompt)
     form.set('n', String(params.n))
     if (params.size) form.set('size', params.size)

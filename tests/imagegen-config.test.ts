@@ -324,6 +324,22 @@ describe('imagegen config per-model specs', () => {
     expect(result.warnings.join('\n')).toContain('generationConfig 只对 gemini 方言生效')
   })
 
+  it('keeps a per-model editModelId for capability-split edit surfaces', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      models: [
+        { id: 'grok-imagine-image', edit: true, editModelId: 'grok-imagine-image-edit' },
+        { id: 'm2', edit: true, editModelId: 'not a slug!' },
+        { id: 'm3', edit: true, editModelId: '   ' },
+      ],
+    })
+    const specs = result.providers[0].modelSpecs
+    expect(specs.find((m) => m.id === 'grok-imagine-image')?.editModelId).toBe('grok-imagine-image-edit')
+    expect(specs.find((m) => m.id === 'm2')?.editModelId).toBeUndefined()
+    expect(specs.find((m) => m.id === 'm3')?.editModelId).toBeUndefined()
+    expect(result.warnings.join('|')).toContain('editModelId must be a non-empty slug')
+  })
+
   it('drops a per-model fixedSizeNote that its own sizes make unreachable', () => {
     const result = load({
       ...MODEL_PROVIDER,

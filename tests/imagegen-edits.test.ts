@@ -160,3 +160,74 @@ describe('openai-images image editing', () => {
     expect(parsed.image.url).toBe(`data:image/png;base64,${REFERENCE.toString('base64')}`)
   })
 })
+
+describe('per-model edit-surface model name (editModelId)', () => {
+  it('sends the declared edit-surface model name to /images/edits in the xai-json dialect', async () => {
+    const calls: { body: unknown }[] = []
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ body: init?.body })
+      return new Response(JSON.stringify({ data: [{ url: 'https://imgen.example/x.jpeg' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    await generateImages(
+      provider({
+        models: ['grok-imagine-image'],
+        defaultModel: 'grok-imagine-image',
+        editModels: ['grok-imagine-image'],
+        editsStyle: 'xai-json',
+        modelSpecs: [{
+          id: 'grok-imagine-image',
+          dialect: 'openai-images',
+          sizes: ['1024x1024'],
+          fixedSizeNote: null,
+          edit: true,
+          editsStyle: 'xai-json',
+          editModelId: 'grok-imagine-image-edit',
+          note: null,
+          timeoutMs: 90_000,
+        }],
+      }),
+      {
+        model: 'grok-imagine-image',
+        prompt: 'turn it blue',
+        n: 1,
+        image: { mimeType: 'image/png', base64: REFERENCE.toString('base64') },
+      },
+      AbortSignal.timeout(5000),
+      fetchImpl
+    )
+
+    const parsed = JSON.parse(String(calls[0]!.body)) as { model: string }
+    // The picker model id stays what the user selected; the edit surface
+    // receives the capability-named model the upstream routes by.
+    expect(parsed.model).toBe('grok-imagine-image-edit')
+  })
+
+  it('keeps the picker model id on the edit surface when no editModelId is declared', async () => {
+    const calls: { body: unknown }[] = []
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ body: init?.body })
+      return new Response(JSON.stringify({ data: [{ url: 'https://imgen.example/x.jpeg' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    await generateImages(
+      provider({ editModels: ['gpt-image-2.5'] }),
+      {
+        model: 'gpt-image-2.5',
+        prompt: 'p',
+        n: 1,
+        image: { mimeType: 'image/png', base64: REFERENCE.toString('base64') },
+      },
+      AbortSignal.timeout(5000),
+      fetchImpl
+    )
+    const form = calls[0]!.body as FormData
+    expect(form.get('model')).toBe('gpt-image-2.5')
+  })
+})
