@@ -333,6 +333,18 @@ describe('imagegen config per-model specs', () => {
     expect(result.warnings.join('\n')).toContain('fixedSizeNote is unused because sizes is set')
   })
 
+  it('does not leak the provider fixedSizeNote into a per-model note', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      fixedSizeNote: '固定 2:3 竖版输出',
+      models: [{ id: 'm', sizes: [] }],
+    })
+    const spec = result.providers[0].modelSpecs[0]
+    // fixedSizeNote stays in its own slot; the hint slot stays empty.
+    expect(spec.fixedSizeNote).toBe('固定 2:3 竖版输出')
+    expect(spec.note).toBeNull()
+  })
+
   it('truncates long notes to 80 characters', () => {
     const result = load({
       ...MODEL_PROVIDER,

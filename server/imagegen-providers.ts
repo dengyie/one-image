@@ -221,6 +221,18 @@ async function fetchVideoBytes(url: URL, provider: ImagegenProviderConfig, signa
   if (!response.ok) {
     throw new ImagegenUpstreamError(`下载生成视频失败：HTTP ${response.status}`, response.status, 502)
   }
+  // A misrouted model or a chatty reply can hand back an image where the clip
+  // should be. Fail loudly before reading the body: wrapping PNG bytes as
+  // video/mp4 would bill the user for an unplayable file with no explanation.
+  const declaredType = response.headers.get('content-type')?.split(';')[0]?.trim() ?? ''
+  if (declaredType.startsWith('image/')) {
+    throw new ImagegenUpstreamError('上游返回的不是视频而是图片', 0, 502)
+  }
+  // A declared size that already exceeds the cap never needs downloading.
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_VIDEO_BYTES) {
+    throw new ImagegenUpstreamError('生成视频超过 64MB 上限', 0, 502)
+  }
   const buffer = Buffer.from(await response.arrayBuffer())
   if (buffer.byteLength > MAX_VIDEO_BYTES) {
     throw new ImagegenUpstreamError('生成视频超过 64MB 上限', 0, 502)
@@ -233,7 +245,13 @@ function decodeVideoDataUrl(ref: string): VideoGenResult {
   if (!match || !match[2]) {
     throw new ImagegenUpstreamError('上游返回了无法解码的内联视频', 0, 502)
   }
-  const mimeType = match[1] && match[1].startsWith('video/') ? match[1] : 'video/mp4'
+  const mimeType = match[1] ?? ''
+  // Inline base64 in a video reply is an image unless proven otherwise;
+  // guessing a container for unlabeled bytes would hand the player image
+  // data as video/mp4.
+  if (!mimeType.startsWith('video/')) {
+    throw new ImagegenUpstreamError('上游返回的不是视频而是图片', 0, 502)
+  }
   const bytes = Buffer.from(match[3].replace(/\s+/g, ''), 'base64')
   if (bytes.byteLength > MAX_VIDEO_BYTES) {
     throw new ImagegenUpstreamError('生成视频超过 64MB 上限', 0, 502)
@@ -599,7 +617,10 @@ export function extractChatImageRefs(message: ChatMessage, options: { video?: bo
     if (typeof value !== 'string') return
     const trimmed = value.trim()
     if (trimmed.length === 0) return
-    const inlinePrefix = options.video ? /^(https?:\/\/|data:(?:image|video)\/)/i : /^(https?:\/\/|data:image\/)/i
+    // Video mode only accepts http(s) and inline *video* data URLs: an image
+    // data URL in a video reply is a misroute, and wrapping its bytes as
+    // video/mp4 would hand the player an unplayable file.
+    const inlinePrefix = options.video ? /^(https?:\/\/|data:video\/)/i : /^(https?:\/\/|data:image\/)/i
     if (inlinePrefix.test(trimmed) && !refs.includes(trimmed)) refs.push(trimmed)
   }
   const content = message.content

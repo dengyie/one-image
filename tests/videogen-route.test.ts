@@ -186,3 +186,21 @@ describe('videogen routes', () => {
     expect(JSON.parse(quota.body)).toEqual({ used: 0, cap: 2, remaining: 2 })
   })
 })
+
+describe('videogen failure mapping', () => {
+  it('maps an upstream timeout to 504 upstream_timeout', async () => {
+    const fetchImpl = vi.fn(async () => {
+      const err = new Error('The operation was aborted due to timeout')
+      err.name = 'TimeoutError'
+      throw err
+    }) as unknown as typeof fetch
+    const { app, appDb } = createApp([provider()], { fetchImpl })
+    const res = await app.inject({ method: 'POST', url: '/api/v1/videogen', payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })
+    expect(res.statusCode).toBe(504)
+    expect(JSON.parse(res.body).error).toBe('upstream_timeout')
+    // The failed attempt still billed the ledger (documented semantics).
+    const quota = await app.inject({ method: 'GET', url: '/api/v1/videogen/quota' })
+    expect(JSON.parse(quota.body).used).toBe(1)
+    appDb.close()
+  })
+})

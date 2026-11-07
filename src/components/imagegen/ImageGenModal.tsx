@@ -129,10 +129,13 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
     const next = caps?.providers.find((p) => p.id === id)
     setProviderId(id)
     if (next && next.modelInfos.length > 0) {
-      setModel(next.modelInfos[0].id)
+      // Same resolution rule as resolveImagegenSelection: the configured
+      // default wins when it is an image model, not merely the first entry.
+      const nextDefault = next.modelInfos.find((m) => m.id === next.defaultModel) ?? next.modelInfos[0]
+      setModel(nextDefault.id)
       setSize('')
       // A reference only exists for models that accept one.
-      if (!next.modelInfos[0].edit) setReference(null)
+      if (!nextDefault.edit) setReference(null)
     }
   }
 
@@ -438,7 +441,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
               {loading ? (
                 <>
                   <UiIcon name="loader" className="w-4 h-4 animate-spin" />
-                  生成中{count > 1 ? '，多张会并行请求' : ''}，通常 {modelInfo.note ?? '30-90 秒'}…
+                  {count > 1 ? '生成中，多张会并行请求，通常 30-90 秒…' : '生成中，通常 30-90 秒…'}
                 </>
               ) : (
                 <>
