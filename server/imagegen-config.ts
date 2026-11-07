@@ -27,6 +27,12 @@ export interface ImagegenModelSpec {
   fixedSizeNote: string | null
   edit: boolean
   editsStyle: 'multipart' | 'xai-json'
+  // Upstream model name to use *for image-to-image requests only*. Some
+  // backends route generation vs editing by distinct capability-named models
+  // (e.g. grok2api: `grok-imagine-image` = text-to-image capability,
+  // `grok-imagine-image-edit` = image-edit capability) while the picker keeps
+  // a single entry. Absent: the picker model id is sent on the edit surface.
+  editModelId?: string
   generationConfig?: Record<string, unknown>
   // Free-form operator hint for the picker: expected latency, quirks.
   note: string | null
@@ -87,6 +93,7 @@ interface RawModelInput {
   fixedSizeNote?: unknown
   edit?: unknown
   editsStyle?: unknown
+  editModelId?: unknown
   generationConfig?: unknown
   note?: unknown
   timeoutMs?: unknown
@@ -318,6 +325,18 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
         warnings.push(`${modelLabel} (${id}): video models take no editsStyle; ignoring`)
       }
 
+      // The edit-surface model name is a per-model declaration; only its
+      // shape is validated here, and only the openai-images edits branch
+      // consumes it.
+      let editModelId: string | undefined
+      if (m.editModelId !== undefined) {
+        if (typeof m.editModelId === 'string' && /^[A-Za-z0-9._-]{1,96}$/.test(m.editModelId.trim())) {
+          editModelId = m.editModelId.trim()
+        } else {
+          warnings.push(`${modelLabel} (${id}): editModelId must be a non-empty slug; ignoring`)
+        }
+      }
+
       let generationConfig: Record<string, unknown> | undefined
       if (isVideo) {
         if (m.generationConfig !== undefined) warnings.push(`${modelLabel} (${id}): video models take no generationConfig; ignoring`)
@@ -340,6 +359,7 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
           fixedSizeNote: resolveFixedSizeNote(fixedSizeNote, sizes),
           edit,
           editsStyle,
+          ...(editModelId ? { editModelId } : {}),
           ...(generationConfig ? { generationConfig } : {}),
           note: note ?? null,
           timeoutMs: clampTimeout(timeoutRaw ?? providerTimeoutRaw ?? 90_000),

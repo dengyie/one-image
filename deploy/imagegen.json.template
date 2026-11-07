@@ -15,7 +15,8 @@
           "sizes": ["1024x1024", "1536x1024", "1024x1536"],
           "edit": true,
           "editsStyle": "xai-json",
-          "note": "最快 5-11s，尺寸三档真实可选，参考图走 xAI JSON 方言"
+          "editModelId": "grok-imagine-image-edit",
+          "note": "最快 5-11s，尺寸三档真实可选；参考图走编辑专用模型 grok-imagine-image-edit（xAI JSON 方言）"
         },
         {
           "id": "grok-imagine-image-2.0",
