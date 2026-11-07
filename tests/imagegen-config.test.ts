@@ -418,3 +418,70 @@ it('warns when both the file and inline config env are set (file wins)', async (
   expect(result.providers).toHaveLength(1)
   expect(result.warnings.some((w) => w.includes('the file wins'))).toBe(true)
 })
+
+describe('imagegen config captionModel', () => {
+  const GEMINI_PROVIDER = {
+    id: 'google-direct',
+    name: 'Google Direct',
+    type: 'gemini',
+    baseUrl: 'https://api.example.com/v1',
+    apiKey: 'sk-test',
+    models: ['gemini-3.1-flash-image', 'gemini-text-only'],
+  }
+  const load = (provider: Record<string, unknown>) =>
+    loadImagegenConfig({ ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({ providers: [provider] }) })
+
+  it('keeps a captionModel that names a gemini-dialect model', () => {
+    const result = load({ ...GEMINI_PROVIDER, captionModel: 'gemini-3.1-flash-image' })
+    expect(result.warnings).toEqual([])
+    expect(result.providers[0].captionModel).toBe('gemini-3.1-flash-image')
+  })
+
+  it('drops an unknown captionModel with a warning', () => {
+    const result = load({ ...GEMINI_PROVIDER, captionModel: 'typo-model' })
+    expect(result.providers[0].captionModel).toBeUndefined()
+    expect(result.warnings.some((w) => w.includes('captionModel not in models'))).toBe(true)
+  })
+
+  it('keeps a captionModel on any non-video dialect and hides caption-only models', () => {
+    const result = load({
+      ...GEMINI_PROVIDER,
+      models: [
+        'gemini-3.1-flash-image',
+        { id: 'grok-imagine-image', dialect: 'openai-images' },
+        { id: 'gemini-3.8-flash', dialect: 'openai-chat-image', captionOnly: true },
+      ],
+      captionModel: 'gemini-3.8-flash',
+      defaultModel: 'gemini-3.8-flash',
+    })
+    expect(result.warnings.some((w) => w.includes('defaultModel not in models'))).toBe(true)
+    expect(result.providers[0].captionModel).toBe('gemini-3.8-flash')
+    // A caption-only default falls back to the first pickable image model.
+    expect(result.providers[0].defaultModel).toBe('gemini-3.1-flash-image')
+  })
+
+  it('drops a captionModel that names a video model with a warning', () => {
+    const result = load({
+      ...GEMINI_PROVIDER,
+      models: ['gemini-3.1-flash-image', { id: 'grok-imagine-video', dialect: 'openai-chat-video' }],
+      captionModel: 'grok-imagine-video',
+    })
+    expect(result.providers[0].captionModel).toBeUndefined()
+    expect(result.warnings.some((w) => w.includes('captionModel 不能是视频模型'))).toBe(true)
+  })
+
+  it('rejects non-boolean captionOnly with a warning', () => {
+    const result = load({
+      ...GEMINI_PROVIDER,
+      models: [{ id: 'gemini-3.8-flash', dialect: 'openai-chat-image', captionOnly: 'yes' }],
+    })
+    expect(result.warnings.some((w) => w.includes('captionOnly must be a boolean'))).toBe(true)
+    expect(result.providers[0].modelSpecs.find((m) => m.id === 'gemini-3.8-flash')?.captionOnly).toBeUndefined()
+  })
+
+  it('ignores a non-string captionModel', () => {
+    const result = load({ ...GEMINI_PROVIDER, captionModel: 7 })
+    expect(result.providers[0].captionModel).toBeUndefined()
+    expect(result.warnings.some((w) => w.includes('captionModel not in models'))).toBe(true)
+  })
+})

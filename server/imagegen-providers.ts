@@ -834,3 +834,133 @@ export async function generateVideo(
     ? decodeVideoDataUrl(ref)
     : fetchVideoBytes(resolveMediaUrl(ref, provider, '视频'), provider, signal, fetchImpl)
 }
+
+// Image → text caption for the 换源重绘 prefill. The picture is *described*,
+// never sent to a pixel-level edit surface: the description feeds a fresh
+// text-to-image generation, so nothing embedded in the source pixels can
+// leak into the result (the measured reason the i2i route stays detectable,
+// 开发文档 §16.44). Same envelope as the gemini image dialect, but a
+// text-only generationConfig — a text-only reply is the expected outcome
+// here, and any image part in the reply is simply ignored.
+const CAPTION_PROMPT =
+  '请为文生图模型详细描述这张图片，供它重绘一张画面相同的新图。依次说明：主体与姿态、构图与视角、场景与背景元素、艺术风格、色调与光线、材质与细节。只输出描述文字本身，不要任何前言或解释。'
+
+export async function captionImage(
+  provider: ImagegenProviderConfig,
+  image: ImageInput,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch = fetch
+): Promise<string> {
+  const model = provider.captionModel
+  const spec = model ? provider.modelSpecs.find((m) => m.id === model) : undefined
+  if (!model || !spec || spec.dialect === 'openai-chat-video') {
+    throw new ImagegenUpstreamError('该服务未配置可用的图片描述模型', 0, 503)
+  }
+  if (spec.dialect === 'gemini') return captionViaGemini(provider, spec, model, image, signal, fetchImpl)
+  return captionViaChat(provider, model, image, signal, fetchImpl)
+}
+
+// Image → text over the OpenAI chat surface (aggregators serve their VLMs
+// here). The text reply IS the caption — image refs in the message are
+// ignored, since the caller wants a description, not a picture.
+async function captionViaChat(
+  provider: ImagegenProviderConfig,
+  model: string,
+  image: ImageInput,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch
+): Promise<string> {
+  const response = await upstreamFetch(fetchImpl, `${provider.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${provider.apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [buildChatUserMessage({ model, prompt: CAPTION_PROMPT, n: 1, image })],
+      stream: false,
+    }),
+    signal,
+  })
+  if (!response.ok) {
+    throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
+  }
+  const payload = (await response.json().catch(() => null)) as
+    | { choices?: { message?: ChatMessage }[]; error?: { message?: string } }
+    | null
+  const message = payload?.choices?.[0]?.message
+  const text = chatMessageText(message)
+  if (!text) {
+    throw new ImagegenUpstreamError('上游返回中没有图片描述（可能被安全策略拦截或模型不支持看图）', 0, 502)
+  }
+  return text.slice(0, 4000)
+}
+
+function chatMessageText(message: ChatMessage | undefined): string {
+  if (!message) return ''
+  if (typeof message.content === 'string') return message.content.trim()
+  if (Array.isArray(message.content)) {
+    return (message.content as { type?: unknown; text?: unknown }[])
+      .map((part) => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+      .filter((part) => part.trim().length > 0)
+      .join('\n')
+      .trim()
+  }
+  return ''
+}
+
+// Image → text over the native gemini surface. Same envelope as the image
+// dialect, but the generationConfig travels unchanged: gateways in front of
+// Gemini route on it (a TEXT-only body can come back "no channel for this
+// model" while the configured body routes fine), and the parser below simply
+// ignores any image part the model may return.
+async function captionViaGemini(
+  provider: ImagegenProviderConfig,
+  spec: ImagegenModelSpec,
+  model: string,
+  image: ImageInput,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch
+): Promise<string> {
+  const geminiBase = provider.baseUrl.replace(/\/v1\/?$/, '')
+  const response = await upstreamFetch(
+    fetchImpl,
+    `${geminiBase}/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': provider.apiKey,
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: CAPTION_PROMPT }, { inlineData: { mimeType: image.mimeType, data: image.base64 } }],
+          },
+        ],
+        generationConfig: spec.generationConfig ?? { responseModalities: ['TEXT'] },
+      }),
+      signal,
+    },
+  )
+  if (!response.ok) {
+    throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
+  }
+  const payload = (await response.json().catch(() => null)) as GeminiResponse | null
+  const parts = payload?.candidates?.[0]?.content?.parts ?? []
+  const text = parts
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .filter((part) => part.trim().length > 0)
+    .join('\n')
+    .trim()
+  if (!text) {
+    // Quote whatever the model did say: a 200 without usable text is how a
+    // refusal, a safety block and an image-only envelope all look from here.
+    const anyText = parts.map((part) => (typeof part.text === 'string' ? part.text : '')).join(' ').trim()
+    const hint = anyText ? `：模型回复「${truncate(anyText, 120)}」` : '（可能被安全策略拦截或模型不支持看图）'
+    throw new ImagegenUpstreamError(`上游返回中没有图片描述${hint}`, 0, 502)
+  }
+  return text.slice(0, 4000)
+}

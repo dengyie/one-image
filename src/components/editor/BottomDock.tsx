@@ -64,6 +64,8 @@ interface BottomDockProps {
   onCheckProvenanceTarget: (target: 'current' | 'original') => void
   onStripMetadata?: () => void
   isStrippingMetadata?: boolean
+  onOpenRegenerate?: () => void
+  isPreparingRegen?: boolean
   provenanceResultDetail: ProvenanceRouteResponse | null
   provenanceError?: string | null
   hasEraseAiRegions?: boolean
@@ -142,6 +144,8 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   onCheckProvenanceTarget,
   onStripMetadata,
   isStrippingMetadata,
+  onOpenRegenerate,
+  isPreparingRegen,
   provenanceResultDetail,
   provenanceError,
   hasEraseAiRegions,
@@ -231,6 +235,8 @@ export const BottomDock: React.FC<BottomDockProps> = ({
             onStripMetadata={onStripMetadata}
             isStrippingMetadata={isStrippingMetadata}
             isCheckingProvenance={isCheckingProvenance ?? false}
+            onOpenRegenerate={onOpenRegenerate}
+            isPreparingRegen={isPreparingRegen}
             provenanceResult={provenanceResultDetail}
             provenanceError={provenanceError}
             hasEraseAiRegions={hasEraseAiRegions}

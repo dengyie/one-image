@@ -188,7 +188,9 @@ function pngMetadataKind(type: string, payload: Uint8Array): string | null {
 function webpMetadataKind(type: string): string | null {
   if (type === 'EXIF') return 'EXIF'
   if (type === 'XMP ') return 'XMP'
-  if (type === 'JUMBF') return 'C2PA'
+  // RIFF fourccs are exactly four bytes: the C2PA box is `JUMB` (the fifth
+  // byte belongs to the payload). image-signals.ts scans for the same shape.
+  if (type === 'JUMB') return 'C2PA'
   return null
 }
 

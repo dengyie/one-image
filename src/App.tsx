@@ -50,8 +50,8 @@ import { AuthModal } from './components/auth/AuthModal'
 import { ProfileModal } from './components/auth/ProfileModal'
 import { ImageGenModal, type ImageGenOutcome } from './components/imagegen/ImageGenModal'
 import { VideoGenModal } from './components/imagegen/VideoGenModal'
-import { REFERENCE_MAX_EDGE, type ReferenceSource } from './application/imagegen-input'
-import { fetchImagegenCapabilities } from './infrastructure/imagegen-client'
+import { REFERENCE_MAX_EDGE, prepareReferenceImage, type ReferenceSource } from './application/imagegen-input'
+import { captionImage, fetchImagegenCapabilities } from './infrastructure/imagegen-client'
 import { HistoryDrawer, type UnifiedHistoryItem } from './components/history/HistoryDrawer'
 import {
   fetchCurrentUser,
@@ -160,6 +160,12 @@ export function App() {
   const [isSmartErasing, setIsSmartErasing] = useState(false)
   const [smartEraseStage, setSmartEraseStage] = useState<SmartEraseStage | null>(null)
   const [smartEraseError, setSmartEraseError] = useState<string | null>(null)
+  // 智能一键去水印: lossless metadata cleanup + honest provenance report. The
+  // 换源重绘 prefill seed (server caption) rides along; generation itself
+  // stays a manual click inside the modal.
+  const [isOneClickCleaning, setIsOneClickCleaning] = useState(false)
+  const [isPreparingRegen, setIsPreparingRegen] = useState(false)
+  const [regenSeed, setRegenSeed] = useState<{ prompt: string; nonce: number } | null>(null)
 
   // History & Storage State
   const [localHistoryItems, setLocalHistoryItems] = useState<LocalHistoryItem[]>([])
@@ -1127,32 +1133,50 @@ export function App() {
     }
   }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode])
 
+  // Lossless metadata cleanup, shared by the standalone strip button and the
+  // one-click watermark entry. Pristine files get pure container surgery
+  // (pixels untouched, byte-identical image data); edited files re-export as
+  // PNG, which drops metadata by construction.
+  const buildCleanedFile = useCallback(async (): Promise<{ file: File; removed: string[] }> => {
+    if (!file || !decodedSource || !currentState) throw new Error('没有打开的图片')
+    const pristine = editorStatesEqual(createEditorState(decodedSource.width, decodedSource.height), currentState)
+    if (pristine) {
+      const output = await stripImageMetadata(file)
+      const filename = `${file.name.replace(/\.[^/.]+$/, '')}_privacy_cleaned${extensionForMime(file.type)}`
+      return { file: new File([output.blob], filename, { type: output.blob.type }), removed: output.removed }
+    }
+    const blob = await exportEditor(decodedSource, currentState, factory, 'image/png', 1)
+    return {
+      file: new File([blob], `${file.name.replace(/\.[^/.]+$/, '')}_privacy_cleaned.png`, { type: blob.type }),
+      removed: ['EXIF/GPS/XMP/C2PA 源容器信息'],
+    }
+  }, [file, decodedSource, currentState, factory])
+
+  const openCleanedDocument = useCallback(
+    async (cleaned: { file: File; removed: string[] }): Promise<boolean> => {
+      const opened = await documentSwitcher.openDocument(cleaned.file, (decoded) => ({
+        docId: createDraftId(),
+        file: cleaned.file,
+        state: createEditorState(decoded.width, decoded.height),
+      }))
+      return Boolean(opened)
+    },
+    [documentSwitcher]
+  )
+
   const handleStripMetadata = useCallback(async () => {
     if (!file || !decodedSource || !currentState) return
     setIsStrippingMetadata(true)
     try {
-      const pristine = editorStatesEqual(createEditorState(decodedSource.width, decodedSource.height), currentState)
-      let cleaned: Blob
-      let filename: string
-      let removed: string[]
-      if (pristine) {
-        const output = await stripImageMetadata(file)
-        cleaned = output.blob
-        removed = output.removed
-        filename = `${file.name.replace(/\.[^/.]+$/, '')}_privacy_cleaned${extensionForMime(file.type)}`
-      } else {
-        cleaned = await exportEditor(decodedSource, currentState, factory, 'image/png', 1)
-        removed = ['EXIF/GPS/XMP/C2PA 源容器信息']
-        filename = `${file.name.replace(/\.[^/.]+$/, '')}_privacy_cleaned.png`
-      }
-      const resultFile = new File([cleaned], filename, { type: cleaned.type })
-      const opened = await documentSwitcher.openDocument(resultFile, (decoded) => ({
-        docId: createDraftId(),
-        file: resultFile,
-        state: createEditorState(decoded.width, decoded.height),
-      }))
+      const cleaned = await buildCleanedFile()
+      const opened = await openCleanedDocument(cleaned)
       if (opened) {
-        showToast(removed.length ? `已清理容器信息：${removed.join('、')}；像素未作算法修改` : '未发现可移除的容器元数据；图片像素未作修改', 'success')
+        showToast(
+          cleaned.removed.length
+            ? `已清理容器信息：${cleaned.removed.join('、')}；像素未作算法修改`
+            : '未发现可移除的容器元数据；图片像素未作修改',
+          'success'
+        )
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -1160,7 +1184,7 @@ export function App() {
     } finally {
       setIsStrippingMetadata(false)
     }
-  }, [file, decodedSource, currentState, factory, documentSwitcher, showToast])
+  }, [file, decodedSource, currentState, buildCleanedFile, openCleanedDocument, showToast])
 
   const handleCheckProvenanceTarget = useCallback(
     async (target: 'current' | 'original') => {
@@ -1201,6 +1225,78 @@ export function App() {
     },
     [file, decodedSource, currentState, exportImage, showToast]
   )
+
+  // 智能一键去水印: scan the *original* bytes for provenance, then run the
+  // lossless container cleanup. The pixel-level SynthID story is told honestly
+  // either way — measured on synthid.com, nothing lossless clears it, so the
+  // report points at the manual 换源重绘 instead of promising removal.
+  const handleOneClickCleanWatermark = useCallback(async () => {
+    if (!file) return
+    setIsOneClickCleaning(true)
+    setProvenanceError(null)
+    try {
+      let geminiSignal = false
+      let scanFailed = false
+      try {
+        const result = await checkProvenance(createProvenanceInput(file, file.name))
+        setProvenanceResultDetail(result)
+        const upstreamSynthid = result.evidence.some((e) => e.signal === 'synthid' && e.outcome === 'detected')
+        const declared = (result.selfDeclared ?? []).some((s) => /synthid|google generative ai/i.test(s.statement))
+        geminiSignal = upstreamSynthid || declared
+      } catch (err: unknown) {
+        console.error('One-click provenance scan failed:', err)
+        scanFailed = true
+      }
+      const cleaned = await buildCleanedFile()
+      const opened = await openCleanedDocument(cleaned)
+      if (!opened) return
+      const scanNote = scanFailed ? '来源检测不可用；' : ''
+      if (geminiSignal) {
+        showToast(
+          `${scanNote}元数据层已无损清理。此图带像素级 SynthID（Google 生成）——像素水印无法无损去除，官方检测仍会命中；需要能过检测的版本请到「水印 → 测试」用换源重绘。`,
+          'info'
+        )
+      } else {
+        showToast(
+          `${scanNote}已无损清理元数据层${cleaned.removed.length ? `（${cleaned.removed.join('、')}）` : ''}；未发现像素级 AI 水印信号，像素未作算法修改`,
+          'success'
+        )
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      showToast(`一键去水印失败：${message}`, 'error')
+    } finally {
+      setIsOneClickCleaning(false)
+    }
+  }, [file, buildCleanedFile, openCleanedDocument, showToast])
+
+  // 换源重绘 prefill: caption the original, then open the generator with the
+  // description seeded and no reference. The generation itself (and its quota
+  // spend) stays a manual click in the modal — this handler only prepares.
+  const handleOpenRegenerate = useCallback(async () => {
+    if (!file) return
+    setIsPreparingRegen(true)
+    setRegenSeed(null)
+    try {
+      let caption: string | null = null
+      try {
+        const prepared = await prepareReferenceImage({ blob: Promise.resolve(file), mimeType: file.type || 'image/png' })
+        const result = await captionImage({ image: { mimeType: prepared.mimeType, base64: prepared.base64 }, timeoutMs: 45_000 })
+        if (result.ok && result.data?.caption) caption = result.data.caption
+        else showToast(`自动描述失败：${result.message ?? '未知原因'}；可手动描述画面后生成`, 'info')
+      } catch (err: unknown) {
+        console.error('Caption prefill failed:', err)
+        showToast('自动描述失败；可手动描述画面后生成', 'info')
+      }
+      if (caption) {
+        setRegenSeed({ prompt: caption, nonce: Date.now() })
+        showToast('已根据原图生成画面描述。生成的是不带参考图的新图——可过官方检测，但画面是重绘而非原图。', 'info')
+      }
+      setShowImageGenModal(true)
+    } finally {
+      setIsPreparingRegen(false)
+    }
+  }, [file, showToast])
 
   // Restoring a local draft is a document switch, so it joins the undo tree:
   // the image that was open stays one undo away.
@@ -1548,6 +1644,8 @@ export function App() {
             zoomPercent={Math.round(zoomScale * 100)}
             onOpenImageGen={imagegenEnabled ? () => setShowImageGenModal(true) : undefined}
             onOpenVideoGen={videogenEnabled ? () => setShowVideoGenModal(true) : undefined}
+            onOneClickCleanWatermark={file ? () => void handleOneClickCleanWatermark() : undefined}
+            isOneClickCleaning={isOneClickCleaning}
             canUndo={canUndoSession(session)}
             canRedo={canRedoSession(session)}
             // Viewport-only movement (pan/zoom live outside the session tree)
@@ -1663,6 +1761,8 @@ export function App() {
             onCheckProvenanceTarget={handleCheckProvenanceTarget}
             onStripMetadata={() => void handleStripMetadata()}
             isStrippingMetadata={isStrippingMetadata}
+            onOpenRegenerate={imagegenEnabled ? () => void handleOpenRegenerate() : undefined}
+            isPreparingRegen={isPreparingRegen}
             hasEraseAiRegions={hasEraseAiRegions}
             onRunErase={(type) => void handleRunErase(type)}
             isSmartErasing={isSmartErasing}
@@ -1749,9 +1849,13 @@ export function App() {
       {/* AI Image Generation Modal */}
       <ImageGenModal
         isOpen={showImageGenModal}
-        onClose={() => setShowImageGenModal(false)}
+        onClose={() => {
+          setShowImageGenModal(false)
+          setRegenSeed(null)
+        }}
         currentImage={file}
         getCurrentReference={getCurrentReference}
+        initialPrompt={regenSeed}
         onGenerated={(files, outcome) => {
           setShowImageGenModal(false)
           void (async () => {

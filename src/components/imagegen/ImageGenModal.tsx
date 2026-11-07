@@ -39,6 +39,12 @@ interface ImageGenModalProps {
   currentImage?: File | null
   /** Renders the current canvas, edits included. Resolves null when nothing is open. */
   getCurrentReference?: () => Promise<ReferenceSource | null>
+  /**
+   * 换源重绘 seed: a server-generated caption to drop into the prompt. When
+   * present on open the reference is cleared too — a reference would keep the
+   * pixel-level watermark this route exists to escape.
+   */
+  initialPrompt?: { prompt: string; nonce: number } | null
 }
 
 const referenceLimitMb = Math.round(REFERENCE_MAX_BYTES / 1024 / 1024)
@@ -49,6 +55,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   onGenerated,
   currentImage,
   getCurrentReference,
+  initialPrompt,
 }) => {
   const [caps, setCaps] = useState<ImagegenCapabilities | null>(null)
   const [capsLoaded, setCapsLoaded] = useState(false)
@@ -113,6 +120,16 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
       setLoading(false)
     }
   }, [isOpen])
+
+  // 换源重绘 seed, consumed once per open: adopt the caption and drop any
+  // reference. A plain open (no seed) keeps the prompt the user left behind.
+  useEffect(() => {
+    if (!isOpen || !initialPrompt) return
+    setPrompt(initialPrompt.prompt)
+    setReference(null)
+    setRevised(null)
+    setError(null)
+  }, [isOpen, initialPrompt])
 
   if (!isOpen) return null
 
