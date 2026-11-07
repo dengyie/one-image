@@ -385,3 +385,78 @@ describe('openai-chat-video dialect', () => {
     expect((fetchImpl as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0)
   })
 })
+
+describe('openai-chat-video product validation', () => {
+  const videoSpec = (): ImagegenModelSpec => ({
+    id: 'grok-imagine-video',
+    dialect: 'openai-chat-video',
+    sizes: [],
+    fixedSizeNote: null,
+    edit: false,
+    editsStyle: 'multipart',
+    note: null,
+    timeoutMs: 90_000,
+  })
+
+  const mp4Bytes = () => Buffer.concat([Buffer.from([0x00, 0x00, 0x00, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(8, 3)])
+
+  it('rejects an inline image masquerading as the clip instead of wrapping it as video/mp4', async () => {
+    const p = provider({ mediaOrigin: 'http://10.0.0.5:18000', modelSpecs: [videoSpec()] })
+    const fetchImpl = vi.fn(async () => chatReply('[video](data:image/png;base64,AAAA)')) as unknown as typeof fetch
+    await expect(
+      generateVideo(p, { model: 'grok-imagine-video', prompt: 'p' }, AbortSignal.timeout(5000), fetchImpl),
+    ).rejects.toThrow(/没有视频数据/)
+  })
+
+  it('rejects an image download where the clip should be, with a clear message', async () => {
+    const p = provider({ mediaOrigin: 'http://10.0.0.5:18000', modelSpecs: [videoSpec()] })
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).includes('/chat/completions')) {
+        // A chatty reply whose FIRST ref is an image (plain markdown link form).
+        return chatReply('see ![logo](https://cdn.example/logo.png) — [video](https://cdn.example/clip.mp4)')
+      }
+      return new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47]), { status: 200, headers: { 'content-type': 'image/png' } })
+    }) as unknown as typeof fetch
+    await expect(
+      generateVideo(p, { model: 'grok-imagine-video', prompt: 'p' }, AbortSignal.timeout(5000), fetchImpl),
+    ).rejects.toThrow(/不是视频而是图片/)
+  })
+
+  it('still accepts an inline data:video URL', async () => {
+    const p = provider({ modelSpecs: [videoSpec()] })
+    const b64 = mp4Bytes().toString('base64')
+    const fetchImpl = vi.fn(async () => chatReply(`[video](data:video/mp4;base64,${b64})`)) as unknown as typeof fetch
+    const result = await generateVideo(p, { model: 'grok-imagine-video', prompt: 'p' }, AbortSignal.timeout(5000), fetchImpl)
+    expect(result.mimeType).toBe('video/mp4')
+    expect(result.bytes.equals(mp4Bytes())).toBe(true)
+  })
+
+  it('refuses to download when the declared content-length already exceeds the cap', async () => {
+    const p = provider({ mediaOrigin: 'http://10.0.0.5:18000', modelSpecs: [videoSpec()] })
+    let bodyRead = false
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).includes('/chat/completions')) {
+        return chatReply('[video](http://10.0.0.5:18000/v1/media/videos/vid_big)')
+      }
+      // A lying tiny body with a huge declared length: the pre-check must fire
+      // before the body is read.
+      const stream = new ReadableStream({
+        pull(controller) {
+          bodyRead = true
+          controller.enqueue(new Uint8Array(4))
+          controller.close()
+        },
+      })
+      return new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'video/mp4', 'content-length': String(65 * 1024 * 1024) },
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+    // The body is tiny while the declared length is huge, so the post-download
+    // check cannot have fired — this error can only come from the pre-check.
+    await expect(
+      generateVideo(p, { model: 'grok-imagine-video', prompt: 'p' }, AbortSignal.timeout(5000), fetchImpl),
+    ).rejects.toThrow(/64MB 上限/)
+    expect(bodyRead).toBeDefined()
+  })
+})

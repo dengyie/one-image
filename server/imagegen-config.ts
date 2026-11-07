@@ -275,8 +275,10 @@ function validateProviders(raw: unknown, source: string, warnings: string[]): Im
         sizes = []
       }
 
-      let note = parseNote(m.note, `${modelLabel} (${id}) note`, warnings)
-      if (note === undefined && !isVideo) note = providerNote
+      // `note` is a per-model declaration only: the provider-level
+      // fixedSizeNote already lands in fixedSizeNote for string entries, and
+      // leaking it into the model hint would render the same sentence twice.
+      const note = parseNote(m.note, `${modelLabel} (${id}) note`, warnings)
 
       const ownNote = parseFixedSizeNote(m.fixedSizeNote, `${modelLabel} (${id}) fixedSizeNote`, warnings)
       let fixedSizeNote = ownNote

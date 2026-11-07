@@ -327,8 +327,10 @@ export function App() {
   useEffect(() => {
     const probe = () => {
       void fetchImagegenCapabilities().then((caps) => {
+        // `enabled` is the *image* surface flag (a video-only provider reports
+        // enabled:false); the video entry gates on its own section alone.
         setImagegenEnabled(Boolean(caps?.enabled && caps.providers.length > 0))
-        setVideogenEnabled(Boolean(caps?.enabled && (caps.video?.providers.length ?? 0) > 0))
+        setVideogenEnabled(Boolean((caps?.video?.providers.length ?? 0) > 0))
       })
     }
     probe()

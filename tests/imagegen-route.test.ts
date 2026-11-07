@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { initDatabase } from '../server/db'
 import { registerImagegenRoutes } from '../server/imagegen-route'
 import { createRateLimiter } from '../server/rate-limit'
-import type { ImagegenProviderConfig } from '../server/imagegen-config'
+import type { ImagegenModelSpec, ImagegenProviderConfig } from '../server/imagegen-config'
 import { withModelSpecs } from './helpers'
 
 function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProviderConfig {
@@ -682,5 +682,103 @@ describe('imagegen url host guard (IPv6 and false positives)', () => {
     expect(res.statusCode).toBe(200)
     expect(seen).toEqual([{ url: 'https://fcdn.example/out.png', auth: 'Bearer sk-test' }])
     appDb.close()
+  })
+})
+
+describe('per-model route semantics', () => {
+  const spec = (overrides: Record<string, unknown> = {}): ImagegenModelSpec => ({
+    id: 'm',
+    dialect: 'openai-images',
+    sizes: [] as string[],
+    fixedSizeNote: null as string | null,
+    edit: false,
+    editsStyle: 'multipart' as const,
+    note: null as string | null,
+    timeoutMs: 90_000,
+    ...overrides,
+  })
+
+  const videoOnlyProvider = () => provider({
+    models: ['grok-imagine-video'],
+    modelSpecs: [spec({ id: 'grok-imagine-video', dialect: 'openai-chat-video' })],
+  })
+
+  it('treats a video-only provider as an unconfigured image surface', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    const { app, appDb } = createApp([videoOnlyProvider()], { fetchImpl })
+    const caps = await app.inject({ method: 'GET', url: '/api/v1/imagegen/capabilities' })
+    expect(caps.statusCode).toBe(503)
+    expect(JSON.parse(caps.body).error).toBe('imagegen_unconfigured')
+
+    const post = await app.inject({ method: 'POST', url: '/api/v1/imagegen', payload: { provider: 'test', model: 'grok-imagine-video', prompt: 'p' } })
+    expect(post.statusCode).toBe(503)
+    expect(JSON.parse(post.body).error).toBe('imagegen_unconfigured')
+
+    const quota = await app.inject({ method: 'GET', url: '/api/v1/imagegen/quota' })
+    expect(quota.statusCode).toBe(503)
+    appDb.close()
+  })
+
+  it('validates size against the selected model, not the provider fallback', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ data: [{ b64_json: Buffer.from(png(64, 64)).toString('base64') }] }), { status: 200 }))
+    const { app } = createApp([provider({
+      models: ['model-a', 'model-b'],
+      modelSpecs: [
+        spec({ id: 'model-a', sizes: ['1024x1024'] }),
+        spec({ id: 'model-b' }),
+      ],
+    })], { fetchImpl: fetchImpl as unknown as typeof fetch })
+
+    const okForA = await app.inject({ method: 'POST', url: '/api/v1/imagegen', payload: { provider: 'test', model: 'model-a', prompt: 'p', size: '1024x1024' } })
+    expect(okForA.statusCode).toBe(200)
+
+    const refusedForB = await app.inject({ method: 'POST', url: '/api/v1/imagegen', payload: { provider: 'test', model: 'model-b', prompt: 'p', size: '1024x1024' } })
+    expect(refusedForB.statusCode).toBe(400)
+    expect(JSON.parse(refusedForB.body).error).toBe('invalid_size')
+  })
+
+  it('lets an explicit per-model edit:false win over the legacy editModels list', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    const { app } = createApp([provider({
+      models: ['model-a', 'model-b'],
+      editModels: ['model-b'],
+      modelSpecs: [
+        spec({ id: 'model-a', edit: true }),
+        spec({ id: 'model-b', edit: false }),
+      ],
+    })], { fetchImpl })
+
+    const refused = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'test', model: 'model-b', prompt: 'p', image: { mimeType: 'image/png', base64: png(64, 64).toString('base64') } },
+    })
+    expect(refused.statusCode).toBe(400)
+    expect(JSON.parse(refused.body).error).toBe('image_input_unsupported')
+
+    const allowed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'test', model: 'model-a', prompt: 'p', image: { mimeType: 'image/png', base64: png(64, 64).toString('base64') } },
+    })
+    expect(allowed.statusCode).toBe(502) // reaches the (failing) mocked upstream
+    expect((fetchImpl as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1)
+  })
+
+  it('projects defaultModel within the image models when the config default is a video id', async () => {
+    const { app } = createApp([provider({
+      models: ['img-model-1', 'grok-imagine-video'],
+      defaultModel: 'grok-imagine-video',
+      modelSpecs: [
+        spec({ id: 'img-model-1' }),
+        spec({ id: 'grok-imagine-video', dialect: 'openai-chat-video' }),
+      ],
+    })])
+    const caps = await app.inject({ method: 'GET', url: '/api/v1/imagegen/capabilities' })
+    expect(caps.statusCode).toBe(200)
+    const body = JSON.parse(caps.body)
+    expect(body.providers[0].defaultModel).toBe('img-model-1')
+    expect(body.video.providers[0].defaultModel).toBe('grok-imagine-video')
   })
 })

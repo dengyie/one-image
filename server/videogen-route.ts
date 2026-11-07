@@ -103,7 +103,10 @@ export function registerVideogenRoutes(app: FastifyInstance, db: DatabaseSync, o
         bytes: result.bytes.byteLength,
         mime: result.mimeType,
       }, 'videogen completed')
-      return videoHeaders(reply, model, result.mimeType, result.bytes.byteLength).status(200).send(result.bytes)
+      return videoHeaders(reply, model, result.mimeType, result.bytes.byteLength)
+        .type(result.mimeType)
+        .status(200)
+        .send(result.bytes)
     } catch (err: unknown) {
       request.log.warn({ err }, 'videogen upstream call failed')
       if (err instanceof ImagegenUpstreamError) {

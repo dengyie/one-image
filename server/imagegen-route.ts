@@ -62,31 +62,42 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     timeoutMs: spec.timeoutMs,
   })
 
-  const publicProvider = (provider: ImagegenProviderConfig) => ({
-    id: provider.id,
-    name: provider.name,
-    models: provider.models,
-    defaultModel: provider.defaultModel ?? provider.models[0],
-    // Sizes stay server-side knowledge of what the upstream accepts; the
-    // picker only needs the list of choices.
-    sizes: provider.sizes ?? [],
-    // When the upstream ignores every aspect request (some self-hosted
-    // backends always return one fixed ratio), say so instead of showing a
-    // picker that lies.
-    fixedSizeNote: provider.fixedSizeNote ?? null,
-    // Which of this provider's models can also take a reference image. Absent
-    // means the picker shows no image-to-image affordance at all.
-    editModels: provider.editModels ?? [],
-    // Per-model capabilities: the image models of this provider with the
-    // provider-level fallbacks resolved. Video models are excluded — they are
-    // served by the videogen surface below, never by the image picker.
-    modelInfos: provider.modelSpecs
-      .filter((m) => m.dialect !== 'openai-chat-video')
-      .map(publicModelInfo),
-    // Lets the browser give up at the same time the server does instead of
-    // waiting on the edge.
-    timeoutMs: provider.timeoutMs ?? 90_000,
-  })
+  // The image surface exists only where at least one model is an image
+  // dialect. A provider carrying exclusively video models must not light up
+  // the image picker (the capabilities would advertise a picker that renders
+  // empty and every generation would 400).
+  const imageProviders = () => providers.filter((p) => p.modelSpecs.some((m) => m.dialect !== 'openai-chat-video'))
+
+  const publicProvider = (provider: ImagegenProviderConfig) => {
+    const imageSpecs = provider.modelSpecs.filter((m) => m.dialect !== 'openai-chat-video')
+    return {
+      id: provider.id,
+      name: provider.name,
+      models: provider.models,
+      // The default must resolve within the image models: a config default
+      // pointing at a video id would otherwise leak into the picker contract.
+      defaultModel: imageSpecs.some((m) => m.id === provider.defaultModel)
+        ? provider.defaultModel!
+        : imageSpecs[0]?.id ?? provider.defaultModel ?? provider.models[0],
+      // Sizes stay server-side knowledge of what the upstream accepts; the
+      // picker only needs the list of choices.
+      sizes: provider.sizes ?? [],
+      // When the upstream ignores every aspect request (some self-hosted
+      // backends always return one fixed ratio), say so instead of showing a
+      // picker that lies.
+      fixedSizeNote: provider.fixedSizeNote ?? null,
+      // Which of this provider's models can also take a reference image. Absent
+      // means the picker shows no image-to-image affordance at all.
+      editModels: provider.editModels ?? [],
+      // Per-model capabilities: the image models of this provider with the
+      // provider-level fallbacks resolved. Video models are excluded — they are
+      // served by the videogen surface below, never by the image picker.
+      modelInfos: imageSpecs.map(publicModelInfo),
+      // Lets the browser give up at the same time the server does instead of
+      // waiting on the edge.
+      timeoutMs: provider.timeoutMs ?? 90_000,
+    }
+  }
 
   const videoProviders = () =>
     providers
@@ -105,7 +116,7 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
 
   app.get('/api/v1/imagegen/capabilities', async (_request: FastifyRequest, reply: FastifyReply) => {
-    if (providers.length === 0) {
+    if (imageProviders().length === 0) {
       return reply.status(503).send({ error: 'imagegen_unconfigured', message: '生图服务未配置' })
     }
     const video = videoProviders()
@@ -120,7 +131,7 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
   // exposing the remaining budget lets the picker say "今日剩余 N 张" instead
   // of teaching the quota through a 429. A plain read, no rate limiter needed.
   app.get('/api/v1/imagegen/quota', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (providers.length === 0) {
+    if (imageProviders().length === 0) {
       return reply.status(503).send({ error: 'imagegen_unconfigured', message: '生图服务未配置' })
     }
     const clientKey = resolveUsageClientKey(request)
@@ -139,7 +150,7 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
       image?: { mimeType?: string; base64?: string }
     }
   }>, reply: FastifyReply) => {
-    if (providers.length === 0) {
+    if (imageProviders().length === 0) {
       return reply.status(503).send({ error: 'imagegen_unconfigured', message: '生图服务未配置' })
     }
     if (rateLimiter && !rateLimiter.allow(request)) {
