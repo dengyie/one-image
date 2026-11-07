@@ -6,6 +6,12 @@
 /** Per-model capabilities as resolved by the server's config loader. */
 export interface ImagegenModelInfo {
   id: string
+  /**
+   * The endpoint surface this model speaks. Absent only when talking to a
+   * server that predates the field; the 换源重绘 steering falls back to the
+   * model-id prefix in that case.
+   */
+  dialect?: string
   sizes: string[]
   /** When sizes is empty: the upstream always returns one fixed ratio. */
   fixedSizeNote: string | null
@@ -137,6 +143,35 @@ export function resolveImagegenSelection(
   // A default that points at a video id (or a stale id) falls back to the
   // first image model the provider actually offers.
   return { providerId: provider.id, model: modelInfos.some((m) => m.id === model) ? model : modelInfos[0].id }
+}
+
+/**
+ * 换源重绘 steering: the whole point of regenerating without a reference is to
+ * escape the pixel-level SynthID the reference carried — and a gemini-dialect
+ * model embeds a fresh SynthID into every render, silently defeating the
+ * route. When the restored selection is such a model (detected by dialect,
+ * falling back to the id prefix for servers that predate the field), move to
+ * the first pickable non-Google model. Returns null when no change is needed,
+ * or when nothing non-Google exists (keeping the user's selection beats an
+ * empty picker).
+ */
+export function steerSelectionAwayFromGoogleDialect(
+  providers: ImagegenProviderInfo[],
+  current: { providerId: string; model: string },
+): { providerId: string; model: string } | null {
+  const isGoogleModel = (info: ImagegenModelInfo | undefined): boolean => {
+    if (!info) return false
+    return info.dialect === 'gemini' || info.id.startsWith('gemini') || info.id.startsWith('nano-banana')
+  }
+  const currentInfo = providers
+    .find((p) => p.id === current.providerId)
+    ?.modelInfos.find((m) => m.id === current.model)
+  if (!isGoogleModel(currentInfo)) return null
+  for (const provider of providers) {
+    const target = provider.modelInfos.find((m) => !isGoogleModel(m))
+    if (target) return { providerId: provider.id, model: target.id }
+  }
+  return null
 }
 
 export async function fetchImagegenCapabilities(): Promise<ImagegenCapabilities | null> {

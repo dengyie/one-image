@@ -55,6 +55,10 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
 
   const publicModelInfo = (spec: ImagegenModelSpec) => ({
     id: spec.id,
+    // The endpoint surface is not a secret and the client needs it for one
+    // decision the server cannot make: 换源重绘 must steer away from
+    // gemini-dialect models, whose output carries SynthID by construction.
+    dialect: spec.dialect,
     sizes: spec.sizes,
     fixedSizeNote: spec.fixedSizeNote,
     edit: spec.edit,

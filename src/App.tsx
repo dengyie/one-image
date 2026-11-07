@@ -152,6 +152,7 @@ export function App() {
   // so the entry buttons stay hidden until the operator configures providers.
   const [showImageGenModal, setShowImageGenModal] = useState(false)
   const [imagegenEnabled, setImagegenEnabled] = useState(false)
+  const [imagegenCaptionEnabled, setImagegenCaptionEnabled] = useState(false)
   // Video generation rides the same capabilities payload (a `video` section);
   // it has its own modal and never enters the bitmap workspace.
   const [showVideoGenModal, setShowVideoGenModal] = useState(false)
@@ -337,6 +338,9 @@ export function App() {
         // enabled:false); the video entry gates on its own section alone.
         setImagegenEnabled(Boolean(caps?.enabled && caps.providers.length > 0))
         setVideogenEnabled(Boolean((caps?.video?.providers.length ?? 0) > 0))
+        // 换源重绘 needs a declared captionModel, not merely a live imagegen:
+        // clicking the button without one buys a guaranteed error toast.
+        setImagegenCaptionEnabled(Boolean(caps?.providers.some((p) => p.captionModel)))
       })
     }
     probe()
@@ -1761,7 +1765,7 @@ export function App() {
             onCheckProvenanceTarget={handleCheckProvenanceTarget}
             onStripMetadata={() => void handleStripMetadata()}
             isStrippingMetadata={isStrippingMetadata}
-            onOpenRegenerate={imagegenEnabled ? () => void handleOpenRegenerate() : undefined}
+            onOpenRegenerate={imagegenEnabled && imagegenCaptionEnabled ? () => void handleOpenRegenerate() : undefined}
             isPreparingRegen={isPreparingRegen}
             hasEraseAiRegions={hasEraseAiRegions}
             onRunErase={(type) => void handleRunErase(type)}
@@ -1858,6 +1862,10 @@ export function App() {
         initialPrompt={regenSeed}
         onGenerated={(files, outcome) => {
           setShowImageGenModal(false)
+          // A 换源重绘 seed must not survive its own session: otherwise the
+          // next *plain* open would silently overwrite the user's prompt with
+          // the stale caption and clear their reference again.
+          setRegenSeed(null)
           void (async () => {
             // Each opened image pushes the previous one into the undo tree,
             // so a multi-image batch stays fully walkable.

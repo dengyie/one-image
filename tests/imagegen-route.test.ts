@@ -72,7 +72,7 @@ describe('imagegen routes', () => {
       sizes: [],
       fixedSizeNote: null,
       editModels: [],
-      modelInfos: [{ id: 'img-model-1', sizes: [], fixedSizeNote: null, edit: false, note: null, timeoutMs: 90_000 }],
+      modelInfos: [{ id: 'img-model-1', dialect: 'openai-images', sizes: [], fixedSizeNote: null, edit: false, note: null, timeoutMs: 90_000 }],
       timeoutMs: 90_000,
     })
     // Timeouts are advertised so the browser can give up with the server; keys

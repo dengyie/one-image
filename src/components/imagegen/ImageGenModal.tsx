@@ -8,6 +8,7 @@ import {
   imagegenFailedCount,
   groupImagegenModels,
   resolveImagegenSelection,
+  steerSelectionAwayFromGoogleDialect,
   type ImagegenCapabilities,
   type ImagegenModelInfo,
   type ImagegenResponse,
@@ -95,7 +96,12 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
       setCaps(result && result.enabled ? result : null)
       setCapsLoaded(true)
       if (result && result.enabled && result.providers.length > 0) {
-        const resolved = resolveImagegenSelection(result.providers, selectionRef.current.providerId, selectionRef.current.model)
+        let resolved = resolveImagegenSelection(result.providers, selectionRef.current.providerId, selectionRef.current.model)
+        // 换源重绘 must not land on a Google model: gemini-dialect output
+        // embeds a fresh SynthID, which is exactly what this route escapes.
+        if (resolved && initialPrompt) {
+          resolved = steerSelectionAwayFromGoogleDialect(result.providers, resolved) ?? resolved
+        }
         if (resolved) {
           setProviderId(resolved.providerId)
           setModel(resolved.model)
@@ -107,7 +113,9 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
     return () => {
       cancelled = true
     }
-  }, [isOpen])
+    // `initialPrompt` participates on purpose: a seeded open must steer the
+    // selection, a plain reopen must restore whatever the user last used.
+  }, [isOpen, initialPrompt])
 
   // Closing ends the session: abandon an in-flight call and drop the reference
   // so the next open starts clean.
@@ -438,6 +446,11 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
                 placeholder="描述你想要的画面…"
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 resize-none focus:outline-none focus:border-emerald-500/60"
               />
+              {initialPrompt && (
+                <span className="block text-[10px] text-sky-300/90 leading-tight">
+                  换源重绘预填：保持无参考图；模型已自动避开 Gemini 系（其产物自带 SynthID，会前功尽弃）。
+                </span>
+              )}
             </label>
 
             {revised && (
