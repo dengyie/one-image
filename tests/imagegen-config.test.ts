@@ -115,11 +115,25 @@ describe('imagegen config loader', () => {
   it('warns and drops a fixedSizeNote that a sizes picker makes unreachable', () => {
     const result = loadImagegenConfig({
       ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({
-        providers: [{ ...VALID_PROVIDER, sizes: ['1024x1024'], fixedSizeNote: '固定 1:1' }],
+        providers: [{
+          ...VALID_PROVIDER,
+          sizes: ['1024x1024'],
+          fixedSizeNote: '固定 1:1',
+          models: [{ id: 'm1' }, { id: 'm2', sizes: [], fixedSizeNote: '固定 3:4' }],
+        }],
       }),
     })
-    expect(result.providers[0].fixedSizeNote).toBeUndefined()
-    expect(result.warnings.join('\n')).toContain('fixedSizeNote is unused because sizes is set')
+    // String-form models inherit the provider sizes, so the provider-level
+    // note is unreachable for them: the resolved spec carries no note.
+    const m1 = result.providers[0].modelSpecs.find((m) => m.id === 'm1')
+    expect(m1?.sizes).toEqual(['1024x1024'])
+    expect(m1?.fixedSizeNote).toBeNull()
+    // A per-model note paired with that model's own empty sizes is reachable
+    // and survives.
+    const m2 = result.providers[0].modelSpecs.find((m) => m.id === 'm2')
+    expect(m2?.sizes).toEqual([])
+    expect(m2?.fixedSizeNote).toBe('固定 3:4')
+    expect(result.warnings.join('\n')).not.toContain('fixedSizeNote is unused')
   })
 })
 
@@ -208,6 +222,157 @@ describe('imagegen config warnings', () => {
     })
     expect(result.providers[0].generationConfig).toBeUndefined()
     expect(result.warnings[0]).toContain('只对 gemini 类型生效')
+  })
+})
+
+describe('imagegen config per-model specs', () => {
+  const MODEL_PROVIDER = {
+    id: 'mangoapi',
+    name: 'MangoApi 聚合',
+    type: 'openai-images',
+    baseUrl: 'https://api.example.com/v1',
+    apiKey: 'sk-test',
+    models: [
+      'grok-imagine-image',
+      {
+        id: 'gpt-image-2',
+        sizes: ['1024x1024', '1536x1024', '1024x1536'],
+        note: '约 44s，尊重尺寸',
+        timeoutMs: 120_000,
+      },
+      {
+        id: 'gemini-3.1-flash-image',
+        dialect: 'gemini',
+        edit: true,
+        fixedSizeNote: '固定 1:1 方形输出',
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+      },
+      { id: 'grok-imagine-video', dialect: 'openai-chat-video', note: '约 40-50s' },
+    ],
+  }
+
+  const load = (provider: Record<string, unknown>) =>
+    loadImagegenConfig({ ONEIMAGE_IMAGE_PROVIDERS: JSON.stringify({ providers: [provider] }) })
+
+  it('normalizes object entries into specs with provider fallbacks', () => {
+    const result = load(MODEL_PROVIDER)
+    expect(result.warnings).toEqual([])
+    const p = result.providers[0]
+    // `models` stays the flat id list; `defaultModel` falls back to the first.
+    expect(p.models).toEqual(['grok-imagine-image', 'gpt-image-2', 'gemini-3.1-flash-image', 'grok-imagine-video'])
+    expect(p.defaultModel).toBe('grok-imagine-image')
+
+    const grok = p.modelSpecs.find((m) => m.id === 'grok-imagine-image')
+    expect(grok).toMatchObject({ dialect: 'openai-images', sizes: [], edit: false, editsStyle: 'multipart', note: null, timeoutMs: 90_000 })
+
+    const gpt = p.modelSpecs.find((m) => m.id === 'gpt-image-2')
+    expect(gpt).toMatchObject({ dialect: 'openai-images', sizes: ['1024x1024', '1536x1024', '1024x1536'], edit: false, note: '约 44s，尊重尺寸' })
+    // Per-model timeout accepted in range then clamped silently.
+    expect(gpt?.timeoutMs).toBe(95_000)
+
+    const gemini = p.modelSpecs.find((m) => m.id === 'gemini-3.1-flash-image')
+    expect(gemini).toMatchObject({
+      dialect: 'gemini',
+      sizes: [],
+      fixedSizeNote: '固定 1:1 方形输出',
+      edit: true,
+    })
+    expect(gemini?.generationConfig).toEqual({ responseModalities: ['TEXT', 'IMAGE'] })
+  })
+
+  it('derives editModels from per-model edit flags and keeps video models out of the image surface', () => {
+    const result = load(MODEL_PROVIDER)
+    const p = result.providers[0]
+    expect(p.editModels).toEqual(['gemini-3.1-flash-image'])
+    const video = p.modelSpecs.find((m) => m.id === 'grok-imagine-video')
+    expect(video).toMatchObject({ dialect: 'openai-chat-video', sizes: [], edit: false, note: '约 40-50s' })
+  })
+
+  it('rejects duplicate model ids and entries without a usable id', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      models: ['m1', { id: 'm1' }, { dialect: 'gemini' }, { id: 'm2' }],
+    })
+    expect(result.providers[0].models).toEqual(['m1', 'm2'])
+    expect(result.warnings.filter((w) => w.includes('duplicate model id'))).toHaveLength(1)
+    expect(result.warnings.join('\n')).toContain('model id must be')
+  })
+
+  it('warns and ignores capability fields that a video model cannot use', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      models: [{ id: 'v', dialect: 'openai-chat-video', sizes: ['1024x1024'], edit: true, editsStyle: 'xai-json', generationConfig: { a: 1 } }],
+    })
+    const video = result.providers[0].modelSpecs[0]
+    expect(video).toMatchObject({ dialect: 'openai-chat-video', sizes: [], edit: false, editsStyle: 'multipart' })
+    expect(video?.generationConfig).toBeUndefined()
+    expect(result.warnings.join('\n')).toContain('video models take no sizes')
+    expect(result.warnings.join('\n')).toContain('video models take no reference image')
+    expect(result.warnings.join('\n')).toContain('video models take no editsStyle')
+    expect(result.warnings.join('\n')).toContain('video models take no generationConfig')
+  })
+
+  it('warns when a per-model editsStyle or generationConfig lands on the wrong dialect', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      models: [
+        { id: 'a', dialect: 'openai-chat-image', editsStyle: 'xai-json' },
+        { id: 'b', dialect: 'openai-images', generationConfig: { a: 1 } },
+      ],
+    })
+    expect(result.warnings.join('\n')).toContain('editsStyle 只对 openai-images 方言生效')
+    expect(result.warnings.join('\n')).toContain('generationConfig 只对 gemini 方言生效')
+  })
+
+  it('drops a per-model fixedSizeNote that its own sizes make unreachable', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      models: [{ id: 'm', sizes: ['1024x1024'], fixedSizeNote: '固定 1:1' }],
+    })
+    expect(result.providers[0].modelSpecs[0].fixedSizeNote).toBeNull()
+    expect(result.warnings.join('\n')).toContain('fixedSizeNote is unused because sizes is set')
+  })
+
+  it('truncates long notes to 80 characters', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      models: [{ id: 'm', note: 'x'.repeat(120) }],
+    })
+    expect(result.providers[0].modelSpecs[0].note).toHaveLength(80)
+  })
+
+  it('keeps disabledModels out of models and deduplicates against it', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      disabledModels: [
+        'gpt-image-1',
+        { id: 'nano-banana-pro', reason: '上游无可用渠道' },
+        { id: 'gpt-image-2' }, // already enabled — ignored
+        'grok-imagine-video', // already enabled — ignored
+        '   ',
+        42,
+      ],
+    })
+    const p = result.providers[0]
+    expect(p.models).not.toContain('gpt-image-1')
+    expect(p.disabledModels).toEqual([
+      { id: 'gpt-image-1', reason: '上游暂无可用渠道' },
+      { id: 'nano-banana-pro', reason: '上游无可用渠道' },
+    ])
+    expect(result.warnings.filter((w) => w.includes('already listed'))).toHaveLength(2)
+    expect(result.warnings.filter((w) => w.includes('id must be a non-empty string'))).toHaveLength(2)
+  })
+
+  it('warns for editModels entries that match no model (diagnostic, not widening)', () => {
+    const result = load({
+      ...MODEL_PROVIDER,
+      editModels: ['grok-imagine-image', 'typo-model', 7],
+    })
+    // 'grok-imagine-image' matches (and thereby opts that model into edits);
+    // the other two each get one warning. The derived surface only ever
+    // contains real model ids, in spec order.
+    expect(result.warnings.filter((w) => w.includes('editModels entry'))).toHaveLength(2)
+    expect(result.providers[0].editModels).toEqual(['grok-imagine-image', 'gemini-3.1-flash-image'])
   })
 })
 

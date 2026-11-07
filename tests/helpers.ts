@@ -1,6 +1,34 @@
 import type Fastify from 'fastify'
 import type { DatabaseSync } from 'node:sqlite'
 import type { VerificationMailer } from '../server/onemail'
+import type { ImagegenProviderConfig } from '../server/imagegen-config'
+
+// Test factories build provider configs the way old string-form config files
+// did; the server now reads per-model specs. This derives them exactly the way
+// the config loader does for string entries, unless the test provided specs.
+type ProviderInput = Omit<ImagegenProviderConfig, 'modelSpecs' | 'disabledModels'> &
+  Partial<Pick<ImagegenProviderConfig, 'modelSpecs' | 'disabledModels'>>
+
+export function withModelSpecs(provider: ProviderInput): ImagegenProviderConfig {
+  if (provider.modelSpecs) return provider as ImagegenProviderConfig
+  const specs = provider.models.map((id) => ({
+    id,
+    dialect: provider.type,
+    sizes: provider.sizes ?? [],
+    fixedSizeNote: (provider.sizes ?? []).length > 0 ? null : provider.fixedSizeNote ?? null,
+    edit: (provider.editModels ?? []).includes(id),
+    editsStyle: provider.type === 'openai-images' ? provider.editsStyle ?? 'multipart' : 'multipart',
+    ...(provider.type === 'gemini' && provider.generationConfig ? { generationConfig: provider.generationConfig } : {}),
+    note: null,
+    timeoutMs: provider.timeoutMs ?? 90_000,
+  }))
+  return {
+    ...provider,
+    modelSpecs: specs,
+    disabledModels: provider.disabledModels ?? [],
+    editModels: provider.editModels,
+  }
+}
 
 export interface FakeMailer extends VerificationMailer {
   outbox: { to: string; code: string }[]

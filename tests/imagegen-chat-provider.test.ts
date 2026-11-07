@@ -3,11 +3,13 @@ import {
   buildChatUserMessage,
   extractChatImageRefs,
   generateImages,
+  generateVideo,
   resolveMediaUrl,
   ImagegenUpstreamError,
 } from '../server/imagegen-providers'
 import { loadImagegenConfig } from '../server/imagegen-config'
-import type { ImagegenProviderConfig } from '../server/imagegen-config'
+import type { ImagegenModelSpec, ImagegenProviderConfig } from '../server/imagegen-config'
+import { withModelSpecs } from './helpers'
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01])
 
@@ -30,7 +32,7 @@ const chatReply = (content: string) => new Response(
 )
 
 function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProviderConfig {
-  return {
+  return withModelSpecs({
     id: 'grok',
     name: 'Grok',
     type: 'openai-chat-image',
@@ -40,7 +42,7 @@ function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProv
     defaultModel: 'grok-imagine-image',
     timeoutMs: 90_000,
     ...overrides,
-  }
+  })
 }
 
 describe('chat-surface image providers', () => {
@@ -294,5 +296,92 @@ describe('chat provider configuration', () => {
     expect(result.providers).toHaveLength(1)
     expect(result.providers[0].mediaOrigin).toBeUndefined()
     expect(result.warnings.join('\n')).toMatch(/mediaOrigin/)
+  })
+})
+
+describe('openai-chat-video dialect', () => {
+  const videoSpec = (): ImagegenModelSpec => ({
+    id: 'grok-imagine-video',
+    dialect: 'openai-chat-video',
+    sizes: [],
+    fixedSizeNote: null,
+    edit: false,
+    editsStyle: 'multipart',
+    note: '约 40-50s',
+    timeoutMs: 90_000,
+  })
+
+  it('extracts bare markdown links and <video src> only in video mode', () => {
+    const content = 'here: [video](http://127.0.0.1:18000/v1/media/videos/vid_1) done'
+    // Image mode ignores plain markdown links — the bang is what makes an image.
+    expect(extractChatImageRefs({ content })).toEqual([])
+    expect(extractChatImageRefs({ content }, { video: true })).toEqual(['http://127.0.0.1:18000/v1/media/videos/vid_1'])
+    expect(
+      extractChatImageRefs({ content: '<video src="http://127.0.0.1:18000/v1/media/videos/vid_2"></video>' }, { video: true }),
+    ).toEqual(['http://127.0.0.1:18000/v1/media/videos/vid_2'])
+  })
+
+  it('still honours image markdown and images[] URLs in video mode', () => {
+    expect(extractChatImageRefs({ content: '![x](https://cdn.example/a.png)' }, { video: true })).toEqual(['https://cdn.example/a.png'])
+    expect(extractChatImageRefs({ images: [{ url: 'https://cdn.example/b.mp4' }] }, { video: true })).toEqual(['https://cdn.example/b.mp4'])
+  })
+
+  it('generateVideo re-points the media URL and sniffs the container mime', async () => {
+    const p = provider({ mediaOrigin: 'http://10.0.0.5:18000', modelSpecs: [videoSpec()] })
+    const mp4 = Buffer.concat([Buffer.from([0x00, 0x00, 0x00, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(8, 1)])
+    const calls: { url: string; init?: RequestInit }[] = []
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), init })
+      if (String(input).includes('/chat/completions')) {
+        return chatReply('[video](http://127.0.0.1:8000/v1/media/videos/vid_1)')
+      }
+      // A gateway labelling the clip octet-stream must not fool the mime.
+      return new Response(mp4, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+    }) as unknown as typeof fetch
+
+    const result = await generateVideo(p, { model: 'grok-imagine-video', prompt: '一只猫' }, AbortSignal.timeout(5000), fetchImpl)
+    expect(result.mimeType).toBe('video/mp4')
+    expect(result.bytes.equals(mp4)).toBe(true)
+    // The loopback URL from the reply was rewritten to the declared origin.
+    expect(calls[1]!.url).toBe('http://10.0.0.5:18000/v1/media/videos/vid_1')
+    // The media origin is private → direct dispatcher, and it never sees the key.
+    expect((calls[1]!.init as { dispatcher?: unknown }).dispatcher).toBeDefined()
+    expect(calls[1]!.init?.headers).toEqual({})
+  })
+
+  it('rejects a text-only reply quoting the model, and a non-video spec', async () => {
+    const p = provider({ mediaOrigin: 'http://10.0.0.5:18000', modelSpecs: [videoSpec()] })
+    const textOnly: typeof fetch = vi.fn(async () => chatReply('我不能生成视频')) as unknown as typeof fetch
+    await expect(
+      generateVideo(p, { model: 'grok-imagine-video', prompt: 'p' }, AbortSignal.timeout(5000), textOnly),
+    ).rejects.toThrow(/没有视频数据.*我不能生成视频/)
+
+    await expect(
+      generateVideo(p, { model: 'grok-imagine-image', prompt: 'p' }, AbortSignal.timeout(5000), textOnly),
+    ).rejects.toThrow(/不是该服务的视频模型/)
+  })
+
+  it('keeps video models off the image surface', async () => {
+    const p = provider({
+      models: ['grok-imagine-image', 'grok-imagine-video'],
+      modelSpecs: [
+        {
+          id: 'grok-imagine-image',
+          dialect: 'openai-images',
+          sizes: [],
+          fixedSizeNote: null,
+          edit: false,
+          editsStyle: 'multipart',
+          note: null,
+          timeoutMs: 90_000,
+        },
+        videoSpec(),
+      ],
+    })
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    await expect(
+      generateImages(p, { model: 'grok-imagine-video', prompt: 'p', n: 1 }, AbortSignal.timeout(5000), fetchImpl),
+    ).rejects.toThrow(/视频模型/)
+    expect((fetchImpl as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0)
   })
 })

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { generateImages } from '../server/imagegen-providers'
 import type { ImagegenProviderConfig } from '../server/imagegen-config'
+import { withModelSpecs } from './helpers'
 
 function png(width: number, height: number): Buffer {
   const header = Buffer.alloc(8 + 8 + 13 + 4)
@@ -15,7 +16,7 @@ function png(width: number, height: number): Buffer {
 }
 
 function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProviderConfig {
-  return {
+  return withModelSpecs({
     id: 'mangoapi',
     name: 'Mango',
     type: 'openai-images',
@@ -25,7 +26,7 @@ function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProv
     defaultModel: 'gpt-image-2.5',
     timeoutMs: 90_000,
     ...overrides,
-  }
+  })
 }
 
 const REFERENCE = png(64, 48)

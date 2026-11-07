@@ -9,6 +9,7 @@ export type UiIconName =
   | "git-branch" | "image" | "layers" | "lock" | "loader" | "moon"
   | "monitor" | "paperclip" | "refresh" | "sparkles" | "square" | "sun"
   | "thumbs-down" | "thumbs-up" | "tool" | "x"
+  | "film"
   // Image Editor extensions:
   | "crop" | "brush" | "highlighter" | "arrow" | "mosaic" | "type"
   | "sliders" | "download" | "undo" | "redo" | "rotate-cw"
@@ -49,6 +50,7 @@ const paths: Record<UiIconName, React.ReactNode> = {
   "thumbs-up": <path d="M7 14V4a2 2 0 0 1 2-2h2l1 6h6a2 2 0 0 1 2 2l-1 7a2 2 0 0 1-2 2H9l-2-3H5a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2h2" />,
   tool: <><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.2 2.2-2.7-.7-.7-2.7 2.2-2.2Z" /></>,
   x: <path d="m6 6 12 12M18 6 6 18" />,
+  film: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 5v14m10 -14v14" /><path d="M3 10h4m10 0h4M3 14h4m10 0h4" /></>,
 
   // Image editing tools:
   crop: <><path d="M8 5v10a1 1 0 0 0 1 1h10" /><path d="M5 8h10a1 1 0 0 1 1 1v10" /></>,

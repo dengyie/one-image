@@ -5,9 +5,10 @@ import { initDatabase } from '../server/db'
 import { registerImagegenRoutes } from '../server/imagegen-route'
 import { createRateLimiter } from '../server/rate-limit'
 import type { ImagegenProviderConfig } from '../server/imagegen-config'
+import { withModelSpecs } from './helpers'
 
 function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProviderConfig {
-  return {
+  return withModelSpecs({
     id: 'test',
     name: 'Test Provider',
     type: 'openai-images',
@@ -16,7 +17,7 @@ function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProv
     models: ['img-model-1'],
     defaultModel: 'img-model-1',
     ...overrides,
-  }
+  })
 }
 
 function createApp(
@@ -71,6 +72,7 @@ describe('imagegen routes', () => {
       sizes: [],
       fixedSizeNote: null,
       editModels: [],
+      modelInfos: [{ id: 'img-model-1', sizes: [], fixedSizeNote: null, edit: false, note: null, timeoutMs: 90_000 }],
       timeoutMs: 90_000,
     })
     // Timeouts are advertised so the browser can give up with the server; keys
@@ -451,6 +453,38 @@ describe('imagegen routes', () => {
     // generationConfig contents merge verbatim into the body (Google API shape),
     // not nested under a key.
     expect(JSON.parse((init as RequestInit).body as string).responseModalities).toEqual(['TEXT', 'IMAGE'])
+    appDb.close()
+  })
+
+  it('normalizes a /v1-suffixed baseUrl for the gemini surface (mixed-gateway providers)', async () => {
+    const pngBase64 = Buffer.from(png(64, 64)).toString('base64')
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: pngBase64 } }] } }],
+      }), { status: 200 }))
+    const app = Fastify()
+    const appDb = initDatabase(':memory:')
+    registerImagegenRoutes(app, appDb.db, {
+      // One gateway provider whose baseUrl carries the OpenAI-style /v1 the
+      // image dialects need; the gemini model must not inherit that suffix.
+      providers: [provider({
+        id: 'mangoapi',
+        type: 'gemini',
+        baseUrl: 'https://api.example.com/v1',
+        models: ['gemini-3.1-flash-image'],
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+      })],
+      dailyCap: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'mangoapi', model: 'gemini-3.1-flash-image', prompt: 'a cat', n: 1 },
+    })
+    expect(res.statusCode).toBe(200)
+    const [url] = fetchImpl.mock.calls[0]
+    expect(String(url)).toBe('https://api.example.com/v1beta/models/gemini-3.1-flash-image:generateContent')
     appDb.close()
   })
 

@@ -15,6 +15,7 @@ import { registerProjectRoutes } from './project-routes'
 import { createOneMailMailer } from './onemail'
 import { loadImagegenConfig } from './imagegen-config'
 import { registerImagegenRoutes } from './imagegen-route'
+import { registerVideogenRoutes } from './videogen-route'
 
 async function main(): Promise<void> {
   // state_json carries the full serialized editor state (stroke point arrays
@@ -68,6 +69,16 @@ async function main(): Promise<void> {
     providers: imagegenConfig.providers,
     rateLimiter: imagegenRateLimiter,
     dailyCap: Number.isFinite(rawDailyCap) && rawDailyCap >= 1 ? Math.floor(rawDailyCap) : 20,
+  })
+  // Video rides the same provider config (per-model `openai-chat-video`
+  // dialect) but bills and times out on its own: clips cost more than images
+  // and the reply is orders of magnitude heavier.
+  const rawVideoCap = Number(process.env.ONEIMAGE_VIDEOGEN_DAILY_CAP ?? 5)
+  const videogenRateLimiter = createRateLimiter({ windowMs: 60_000, maxRequestsPerWindow: 3, maxTrackedClients: 10_000 })
+  registerVideogenRoutes(app, appDb.db, {
+    providers: imagegenConfig.providers,
+    rateLimiter: videogenRateLimiter,
+    dailyCap: Number.isFinite(rawVideoCap) && rawVideoCap >= 1 ? Math.floor(rawVideoCap) : 5,
   })
   registerProvenanceRoute(
     app,

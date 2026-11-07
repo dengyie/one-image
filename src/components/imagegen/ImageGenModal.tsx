@@ -2,11 +2,14 @@ import React, { useEffect, useRef, useState } from 'react'
 import { UiIcon } from '../ui/UiIcon'
 import {
   fetchImagegenCapabilities,
+  fetchImagegenQuota,
   generateImage,
   base64ToFile,
   imagegenFailedCount,
+  groupImagegenModels,
   resolveImagegenSelection,
   type ImagegenCapabilities,
+  type ImagegenModelInfo,
   type ImagegenResponse,
 } from '../../infrastructure/imagegen-client'
 import {
@@ -57,6 +60,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [revised, setRevised] = useState<string | null>(null)
+  const [quota, setQuota] = useState<{ used: number; cap: number; remaining: number } | null>(null)
   // null = a plain text-to-image request, which keeps the outgoing body
   // byte-for-byte identical to the pre-i2i shape.
   const [reference, setReference] = useState<ReferenceImage | null>(null)
@@ -67,6 +71,12 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   // does not list these as dependencies (it runs once per open).
   const selectionRef = useRef({ providerId: '', model: '' })
   selectionRef.current = { providerId, model }
+
+  const refreshQuota = () => {
+    void fetchImagegenQuota().then((next) => {
+      if (next) setQuota(next)
+    })
+  }
 
   useEffect(() => {
     if (!isOpen) return
@@ -86,6 +96,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
         setSize('')
       }
     })
+    refreshQuota()
     return () => {
       cancelled = true
     }
@@ -106,22 +117,30 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   if (!isOpen) return null
 
   const provider = caps?.providers.find((p) => p.id === providerId)
-  const supportsEdit = !!provider && provider.editModels.includes(model)
+  const modelInfo: ImagegenModelInfo | undefined = provider?.modelInfos.find((m) => m.id === model)
+  const supportsEdit = modelInfo?.edit ?? false
+  // Capabilities drive everything per model; the provider-level fields are
+  // only a fallback for a server that has not deployed modelInfos yet.
+  const sizes = modelInfo?.sizes ?? provider?.sizes ?? []
+  const fixedSizeNote = modelInfo ? modelInfo.fixedSizeNote : (provider?.fixedSizeNote ?? null)
+  const modelGroups = provider ? groupImagegenModels(provider.modelInfos) : []
 
   const switchProvider = (id: string) => {
     const next = caps?.providers.find((p) => p.id === id)
     setProviderId(id)
-    if (next) {
-      setModel(next.defaultModel)
+    if (next && next.modelInfos.length > 0) {
+      setModel(next.modelInfos[0].id)
       setSize('')
       // A reference only exists for models that accept one.
-      if (!next.editModels.includes(next.defaultModel)) setReference(null)
+      if (!next.modelInfos[0].edit) setReference(null)
     }
   }
 
   const switchModel = (next: string) => {
     setModel(next)
-    if (!provider?.editModels.includes(next)) setReference(null)
+    const nextInfo = provider?.modelInfos.find((m) => m.id === next)
+    setSize('')
+    if (!nextInfo?.edit) setReference(null)
   }
 
   /** Runs a blob through the downscale/re-encode pipeline and shows it. */
@@ -162,7 +181,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   }
 
   const handleGenerate = async () => {
-    if (!provider) return
+    if (!provider || !modelInfo) return
     const cleanPrompt = prompt.trim()
     if (!cleanPrompt) {
       setError('请先输入提示词')
@@ -172,7 +191,8 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
     setError(null)
     setRevised(null)
     // Abort on close, and give up a little after the server's own upstream
-    // budget so its 504 wins the race and the user sees a real reason.
+    // budget (per model) so its 504 wins the race and the user sees a real
+    // reason.
     const controller = new AbortController()
     abortRef.current = controller
     const result = await generateImage(
@@ -183,12 +203,13 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
         size: size || undefined,
         n: count,
         image: reference ? { mimeType: reference.mimeType, base64: reference.base64 } : undefined,
-        timeoutMs: provider.timeoutMs + 5_000,
+        timeoutMs: (modelInfo.timeoutMs || provider.timeoutMs) + 5_000,
       },
       { signal: controller.signal },
     )
     abortRef.current = null
     setLoading(false)
+    refreshQuota()
     if (!result.ok || !result.data) {
       setError(result.message ?? '生成失败，请稍后重试')
       return
@@ -231,21 +252,23 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
           </div>
         )}
 
-        {caps && provider && (
+        {caps && provider && modelInfo && (
           <>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="space-y-1.5">
-                <span className="text-xs text-zinc-400">生成服务</span>
-                <select
-                  value={providerId}
-                  onChange={(e) => switchProvider(e.target.value)}
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500/60"
-                >
-                  {caps.providers.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </label>
+            <div className={caps.providers.length > 1 ? 'grid grid-cols-2 gap-3' : 'space-y-3'}>
+              {caps.providers.length > 1 && (
+                <label className="space-y-1.5">
+                  <span className="text-xs text-zinc-400">生成服务</span>
+                  <select
+                    value={providerId}
+                    onChange={(e) => switchProvider(e.target.value)}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500/60"
+                  >
+                    {caps.providers.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label className="space-y-1.5">
                 <span className="text-xs text-zinc-400">模型</span>
                 <select
@@ -253,15 +276,34 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
                   onChange={(e) => switchModel(e.target.value)}
                   className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500/60"
                 >
-                  {provider.models.map((m) => (
-                    <option key={m} value={m}>{m}</option>
+                  {modelGroups.map((group) => (
+                    <optgroup key={group.family} label={group.family}>
+                      {group.models.map((m) => (
+                        <option key={m.id} value={m.id}>{m.id}</option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
               </label>
             </div>
 
+            {(modelInfo.note || supportsEdit) && (
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                {supportsEdit && (
+                  <span className="rounded-full bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-emerald-300">支持参考图</span>
+                )}
+                {sizes.length > 0 && (
+                  <span className="rounded-full bg-zinc-800 border border-zinc-700 px-2 py-0.5 text-zinc-400">尺寸可选</span>
+                )}
+                {fixedSizeNote && (
+                  <span className="rounded-full bg-zinc-800 border border-zinc-700 px-2 py-0.5 text-zinc-400">{fixedSizeNote}</span>
+                )}
+                {modelInfo.note && <span className="text-zinc-500">{modelInfo.note}</span>}
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-3 items-start">
-              {provider.sizes.length > 0 ? (
+              {sizes.length > 0 ? (
                 <label className="space-y-1.5">
                   <span className="text-xs text-zinc-400">请求尺寸</span>
                   <select
@@ -270,15 +312,15 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
                     className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-500/60"
                   >
                     <option value="">模型默认</option>
-                    {provider.sizes.map((s) => (
+                    {sizes.map((s) => (
                       <option key={s} value={s}>{s}</option>
                     ))}
                   </select>
                   <span className="block text-[11px] text-zinc-500 leading-relaxed">部分模型会按自己的比例出图，实际尺寸以生成为准</span>
                 </label>
-              ) : provider.fixedSizeNote ? (
+              ) : fixedSizeNote ? (
                 <div className="text-[11px] text-zinc-500 leading-relaxed pt-5">
-                  <span className="text-zinc-400">固定比例：</span>{provider.fixedSizeNote}
+                  <span className="text-zinc-400">固定比例：</span>{fixedSizeNote}
                   <span className="block mt-0.5">出图后会在提示里报告实际像素</span>
                 </div>
               ) : (
@@ -396,7 +438,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
               {loading ? (
                 <>
                   <UiIcon name="loader" className="w-4 h-4 animate-spin" />
-                  生成中，多张会并行请求，通常 30-90 秒…
+                  生成中{count > 1 ? '，多张会并行请求' : ''}，通常 {modelInfo.note ?? '30-90 秒'}…
                 </>
               ) : (
                 <>
@@ -405,6 +447,11 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
                 </>
               )}
             </button>
+            {quota && (
+              <p className="text-[11px] text-zinc-500">
+                今日剩余 {quota.remaining} / {quota.cap} 张
+              </p>
+            )}
             <p className="text-[11px] text-zinc-500 leading-relaxed">
               生成直接进入编辑器工作台，可继续裁剪、调色、加水印并同步历史。API 密钥保存在服务端，浏览器不会接触。
             </p>

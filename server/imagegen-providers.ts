@@ -1,11 +1,12 @@
 import { Agent } from 'undici'
-import type { ImagegenProviderConfig } from './imagegen-config'
+import type { ImagegenProviderConfig, ImagegenModelSpec } from './imagegen-config'
 import { sniffBase64Image } from './image-meta'
 
 // - "openai-images": POST {baseUrl}/images/generations — OpenAI gpt-image-*,
 //   xAI grok-2-image*, and OpenAI-compatible aggregators (new-api etc., which
 //   also front Gemini/DALL-E style models). With a reference image the call
-//   moves to POST {baseUrl}/images/edits (multipart).
+//   moves to POST {baseUrl}/images/edits (multipart, or the per-model
+//   `editsStyle` JSON dialect).
 // - "openai-chat-image": POST {baseUrl}/chat/completions — models an
 //   aggregator only exposes on its chat surface and that answer with the
 //   produced file inside the message (markdown/`images[]`), e.g. xAI
@@ -16,10 +17,14 @@ import { sniffBase64Image } from './image-meta'
 //   reference image becomes an `inlineData` part; the reply's image arrives as
 //   an `inlineData` part (native Google) or as a markdown data:/http URL inside
 //   a text part (gateway envelope), and both are accepted.
+// - "openai-chat-video" (per-model dialect only): same chat surface, but the
+//   message carries the produced *video* (markdown link, `<video src>`); the
+//   route returns the raw bytes. Video never flows through the image result
+//   path — generateVideo() is a separate entry point with its own route.
 //
-// Image-to-image is only offered for models an operator listed in `editModels`,
-// because a model that does not accept pixels answers with a text refusal
-// or a 5xx only after the upstream was paid for.
+// Image-to-image is only offered for models whose spec says `edit`, because a
+// model that does not accept pixels answers with a text refusal or a 5xx only
+// after the upstream was paid for.
 
 export interface GeneratedImage {
   mimeType: string
@@ -53,6 +58,12 @@ export interface ImagegenResult {
   failed?: number
 }
 
+/** A finished video: raw bytes plus the container type we actually sniffed. */
+export interface VideoGenResult {
+  mimeType: string
+  bytes: Buffer
+}
+
 export class ImagegenUpstreamError extends Error {
   readonly status: number
   readonly upstreamStatus: number
@@ -66,6 +77,10 @@ export class ImagegenUpstreamError extends Error {
 }
 
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024
+// Videos are a different order of magnitude from the images this server had
+// carried so far; the cap still has to leave headroom under any proxy in the
+// path, and a generated clip is minutes at most.
+const MAX_VIDEO_BYTES = 64 * 1024 * 1024
 // base64 inflates by 4/3, so 32 MiB of image ≈ 44 MB of characters.
 const MAX_B64_JSON_LENGTH = 44_000_000
 
@@ -78,19 +93,19 @@ function truncate(text: string, max: number): string {
 // URLs). Guard the server-side fetch: https for anything that leaves the
 // operator's own host, no loopback/private hosts, and the provider key must
 // never travel to a host other than the configured baseUrl.
-export function assertSafeImageUrl(rawUrl: string, provider: ImagegenProviderConfig): URL {
+export function assertSafeImageUrl(rawUrl: string, provider: ImagegenProviderConfig, kind: '图片' | '视频' = '图片'): URL {
   let url: URL
   try {
     url = new URL(rawUrl)
   } catch {
-    throw new ImagegenUpstreamError('上游返回的图片地址无法解析', 0, 502)
+    throw new ImagegenUpstreamError(`上游返回的${kind}地址无法解析`, 0, 502)
   }
   const sameHost = url.host === new URL(provider.baseUrl).host
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && sameHost)) {
-    throw new ImagegenUpstreamError(`上游返回了不被允许的图片地址（${url.protocol}//${url.host}）`, 0, 502)
+    throw new ImagegenUpstreamError(`上游返回了不被允许的${kind}地址（${url.protocol}//${url.host}）`, 0, 502)
   }
   if (isPrivateHost(url.hostname)) {
-    throw new ImagegenUpstreamError('上游返回了指向内网/回环地址的图片链接，已拒绝', 0, 502)
+    throw new ImagegenUpstreamError(`上游返回了指向内网/回环地址的${kind}链接，已拒绝`, 0, 502)
   }
   return url
 }
@@ -194,6 +209,49 @@ function mimeOf(contentType: string | null | undefined): string {
   return mime.startsWith('image/') ? mime : 'image/png'
 }
 
+// Video download path: same guards as the image one, a larger byte ceiling and
+// a container-sniffed mime instead of image dimensions.
+async function fetchVideoBytes(url: URL, provider: ImagegenProviderConfig, signal: AbortSignal, fetchImpl: typeof fetch): Promise<VideoGenResult> {
+  const apiKey = url.host === new URL(provider.baseUrl).host ? provider.apiKey : null
+  const response = await fetchImpl(url.toString(), {
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    signal,
+    ...(isPrivateHost(url.hostname) ? { dispatcher: directDispatcher } : {}),
+  } as RequestInit & { dispatcher?: Agent })
+  if (!response.ok) {
+    throw new ImagegenUpstreamError(`下载生成视频失败：HTTP ${response.status}`, response.status, 502)
+  }
+  const buffer = Buffer.from(await response.arrayBuffer())
+  if (buffer.byteLength > MAX_VIDEO_BYTES) {
+    throw new ImagegenUpstreamError('生成视频超过 64MB 上限', 0, 502)
+  }
+  return { mimeType: sniffVideoMime(buffer, response.headers.get('content-type')), bytes: buffer }
+}
+
+function decodeVideoDataUrl(ref: string): VideoGenResult {
+  const match = ref.match(/^data:([^;,]+)?(;base64)?,(.*)$/is)
+  if (!match || !match[2]) {
+    throw new ImagegenUpstreamError('上游返回了无法解码的内联视频', 0, 502)
+  }
+  const mimeType = match[1] && match[1].startsWith('video/') ? match[1] : 'video/mp4'
+  const bytes = Buffer.from(match[3].replace(/\s+/g, ''), 'base64')
+  if (bytes.byteLength > MAX_VIDEO_BYTES) {
+    throw new ImagegenUpstreamError('生成视频超过 64MB 上限', 0, 502)
+  }
+  return { mimeType: sniffVideoMime(bytes, mimeType), bytes }
+}
+
+// Video containers carry their type in the bytes (mp4 `ftyp` box, webm EBML
+// magic), which is more trustworthy than an aggregator's Content-Type. The
+// header only wins when the bytes are neither.
+export function sniffVideoMime(buffer: Buffer, contentType: string | null | undefined): string {
+  if (buffer.length > 8 && buffer.toString('latin1', 4, 8) === 'ftyp') return 'video/mp4'
+  if (buffer.length > 4 && buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) return 'video/webm'
+  const mime = contentType?.split(';')[0]?.trim() ?? ''
+  if (mime.startsWith('video/')) return mime
+  return 'video/mp4'
+}
+
 // Every adapter funnels its result through here so the reported size is the
 // size of the bytes we are actually handing back. The container wins over the
 // declared mime as well: `b64_json` has no content-type, and a few upstreams
@@ -266,19 +324,19 @@ async function collectFanOut(
 // actually reachable, re-point it there. Only the path and query survive: the
 // origin comes from operator config, never from the response, so a bad or
 // hostile upstream cannot steer the fetch to a host of its choosing.
-export function resolveMediaUrl(rawUrl: string, provider: ImagegenProviderConfig): URL {
+export function resolveMediaUrl(rawUrl: string, provider: ImagegenProviderConfig, kind: '图片' | '视频' = '图片'): URL {
   let url: URL
   try {
     url = new URL(rawUrl)
   } catch {
-    throw new ImagegenUpstreamError('上游返回了无法解析的图片地址', 0, 502)
+    throw new ImagegenUpstreamError(`上游返回了无法解析的${kind}地址`, 0, 502)
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ImagegenUpstreamError(`上游返回了不受支持的图片地址（${url.protocol}）`, 0, 502)
+    throw new ImagegenUpstreamError(`上游返回了不受支持的${kind}地址（${url.protocol}）`, 0, 502)
   }
-  if (!isPrivateHost(url.hostname)) return assertSafeImageUrl(rawUrl, provider)
+  if (!isPrivateHost(url.hostname)) return assertSafeImageUrl(rawUrl, provider, kind)
   if (!provider.mediaOrigin) {
-    throw new ImagegenUpstreamError('上游返回了指向内网/回环地址的图片链接，且未配置 mediaOrigin，已拒绝', 0, 502)
+    throw new ImagegenUpstreamError(`上游返回了指向内网/回环地址的${kind}链接，且未配置 mediaOrigin，已拒绝`, 0, 502)
   }
   const origin = new URL(provider.mediaOrigin)
   // Assign path/search on a URL that already carries the operator's origin
@@ -288,7 +346,7 @@ export function resolveMediaUrl(rawUrl: string, provider: ImagegenProviderConfig
   target.pathname = url.pathname.startsWith('/') ? url.pathname : `/${url.pathname}`
   target.search = url.search
   if (target.host !== origin.host) {
-    throw new ImagegenUpstreamError('上游返回的图片地址试图跳出 mediaOrigin，已拒绝', 0, 502)
+    throw new ImagegenUpstreamError(`上游返回的${kind}地址试图跳出 mediaOrigin，已拒绝`, 0, 502)
   }
   return target
 }
@@ -352,10 +410,11 @@ async function collectOpenAIImages(
 async function generateOpenAIImages(
   provider: ImagegenProviderConfig,
   params: ImagegenParams,
+  spec: ImagegenModelSpec,
   signal: AbortSignal,
   fetchImpl: typeof fetch
 ): Promise<ImagegenResult> {
-  if (params.image) return editOpenAIImages(provider, params, params.image, signal, fetchImpl)
+  if (params.image) return editOpenAIImages(provider, params, spec, params.image, signal, fetchImpl)
   const body: Record<string, unknown> = { model: params.model, prompt: params.prompt, n: params.n }
   if (params.size) body.size = params.size
   const response = await fetchImpl(`${provider.baseUrl}/images/generations`, {
@@ -383,6 +442,7 @@ async function generateOpenAIImages(
 async function editOpenAIImages(
   provider: ImagegenProviderConfig,
   params: ImagegenParams,
+  spec: ImagegenModelSpec,
   image: ImageInput,
   signal: AbortSignal,
   fetchImpl: typeof fetch
@@ -390,7 +450,7 @@ async function editOpenAIImages(
   let body: BodyInit
   let contentType: string | undefined
   const endpoint = `${provider.baseUrl}/images/edits`
-  if (provider.editsStyle === 'xai-json') {
+  if (spec.editsStyle === 'xai-json') {
     body = JSON.stringify({
       model: params.model,
       prompt: params.prompt,
@@ -440,16 +500,22 @@ interface GeminiResponse {
 async function generateGemini(
   provider: ImagegenProviderConfig,
   params: ImagegenParams,
+  spec: ImagegenModelSpec,
   signal: AbortSignal,
   fetchImpl: typeof fetch
 ): Promise<ImagegenResult> {
   let revisedText: string | undefined
+  // The Gemini surface mounts at /v1beta, one level above the OpenAI-style
+  // /v1 the other dialects need in their baseUrl. A single gateway provider
+  // carries both, so the /v1 suffix is normalized away here instead of
+  // forcing the config to pick one prefix and break the other dialect.
+  const geminiBase = provider.baseUrl.replace(/\/v1\/?$/, '')
   // generateContent has no per-request image count; n>1 fans out into
   // parallel calls (bounded by the pool) so n stays inside the edge timeout.
   const generateOnce = async (): Promise<GeneratedImage[]> => {
     const parts: Record<string, unknown>[] = [{ text: params.prompt }]
     if (params.image) parts.push({ inlineData: { mimeType: params.image.mimeType, data: params.image.base64 } })
-    const response = await fetchImpl(`${provider.baseUrl}/v1beta/models/${encodeURIComponent(params.model)}:generateContent`, {
+    const response = await fetchImpl(`${geminiBase}/v1beta/models/${encodeURIComponent(params.model)}:generateContent`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -457,7 +523,7 @@ async function generateGemini(
       },
       body: JSON.stringify({
         contents: [{ role: 'user', parts }],
-        ...(provider.generationConfig ?? {}),
+        ...(spec.generationConfig ?? {}),
       }),
       signal,
     })
@@ -516,24 +582,33 @@ async function generateGemini(
 // sends the reference alongside the prompt as a multimodal message, which the
 // same surface accepts.
 const MARKDOWN_IMAGE = /!\[[^\]]*\]\(\s*<?([^)\s>]+)>?\s*\)/g
+// Video replies come back as plain markdown links (`[video](http://…)`) — no
+// `!` prefix — so the video mode matches the bare-link form as well.
+const MARKDOWN_LINK = /\[[^\]]*\]\(\s*<?([^)\s>]+)>?\s*\)/g
 const HTML_IMAGE = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi
+const HTML_VIDEO_SRC = /<(?:video|source)\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi
 
 interface ChatMessage {
   content?: unknown
   images?: unknown
 }
 
-export function extractChatImageRefs(message: ChatMessage): string[] {
+export function extractChatImageRefs(message: ChatMessage, options: { video?: boolean } = {}): string[] {
   const refs: string[] = []
   const add = (value: unknown) => {
     if (typeof value !== 'string') return
     const trimmed = value.trim()
     if (trimmed.length === 0) return
-    if (/^(https?:\/\/|data:image\/)/i.test(trimmed) && !refs.includes(trimmed)) refs.push(trimmed)
+    const inlinePrefix = options.video ? /^(https?:\/\/|data:(?:image|video)\/)/i : /^(https?:\/\/|data:image\/)/i
+    if (inlinePrefix.test(trimmed) && !refs.includes(trimmed)) refs.push(trimmed)
   }
   const content = message.content
   if (typeof content === 'string') {
     for (const match of content.matchAll(MARKDOWN_IMAGE)) add(match[1])
+    if (options.video) {
+      for (const match of content.matchAll(MARKDOWN_LINK)) add(match[1])
+      for (const match of content.matchAll(HTML_VIDEO_SRC)) add(match[1])
+    }
     for (const match of content.matchAll(HTML_IMAGE)) add(match[1])
   } else if (Array.isArray(content)) {
     for (const part of content) {
@@ -551,7 +626,10 @@ export function extractChatImageRefs(message: ChatMessage): string[] {
       if (typeof entry === 'string') add(entry)
       else if (entry && typeof entry === 'object') {
         const item = entry as { url?: unknown; image_url?: unknown; b64_json?: unknown }
-        if (typeof item.b64_json === 'string' && item.b64_json.length > 0) add(`data:image/png;base64,${item.b64_json}`)
+        // Inline base64 in `images[]` is an *image* convention; a video entry
+        // carries a URL, and guessing a container mime for unlabeled base64
+        // would hand the player image bytes as video/mp4.
+        if (typeof item.b64_json === 'string' && item.b64_json.length > 0 && !options.video) add(`data:image/png;base64,${item.b64_json}`)
         else if (typeof item.image_url === 'string') add(item.image_url)
         else if (item.image_url && typeof item.image_url === 'object') add((item.image_url as { url?: unknown }).url)
         else add(item.url)
@@ -634,20 +712,76 @@ export function generateImages(
   signal: AbortSignal,
   fetchImpl: typeof fetch = fetch
 ): Promise<ImagegenResult> {
-  if (!provider.models.includes(params.model)) {
+  const spec = provider.modelSpecs.find((m) => m.id === params.model)
+  if (!spec) {
     return Promise.reject(new ImagegenUpstreamError(`模型 ${params.model} 不在该服务的可用列表中`, 0, 400))
   }
-  // Defence in depth: the route refuses image input for models outside
-  // `editModels`, but an adapter must never quietly send the reference to a
+  // Defence in depth: video never flows through the image result path.
+  if (spec.dialect === 'openai-chat-video') {
+    return Promise.reject(new ImagegenUpstreamError(`模型 ${params.model} 是视频模型，请使用视频生成入口`, 0, 400))
+  }
+  // Defence in depth: the route refuses image input for models whose spec says
+  // `edit: false`, but an adapter must never quietly send the reference to a
   // model that was not declared able to accept it.
-  if (params.image && !provider.editModels?.includes(params.model)) {
+  if (params.image && !spec.edit) {
     return Promise.reject(new ImagegenUpstreamError(`模型 ${params.model} 不接受参考图`, 0, 400))
   }
-  if (provider.type === 'gemini') {
-    return generateGemini(provider, params, signal, fetchImpl)
+  if (spec.dialect === 'gemini') {
+    return generateGemini(provider, params, spec, signal, fetchImpl)
   }
-  if (provider.type === 'openai-chat-image') {
+  if (spec.dialect === 'openai-chat-image') {
     return generateOpenAIChatImage(provider, params, signal, fetchImpl)
   }
-  return generateOpenAIImages(provider, params, signal, fetchImpl)
+  return generateOpenAIImages(provider, params, spec, signal, fetchImpl)
+}
+
+// Video entry point, wired to its own route. The chat reply carries the clip
+// as a media URL (markdown link / `<video src>`), which the same mediaOrigin
+// machinery as images re-points at the operator-reachable origin before the
+// bytes are fetched. No size, no count, no reference image: one prompt, one
+// clip — the upstream has no per-request count and the result is too heavy to
+// fan out casually.
+export async function generateVideo(
+  provider: ImagegenProviderConfig,
+  params: { model: string; prompt: string },
+  signal: AbortSignal,
+  fetchImpl: typeof fetch = fetch
+): Promise<VideoGenResult> {
+  const spec = provider.modelSpecs.find((m) => m.id === params.model)
+  if (!spec || spec.dialect !== 'openai-chat-video') {
+    throw new ImagegenUpstreamError(`模型 ${params.model} 不是该服务的视频模型`, 0, 400)
+  }
+  const response = await fetchImpl(`${provider.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${provider.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: params.model,
+      messages: [{ role: 'user', content: params.prompt }],
+      stream: false,
+    }),
+    signal,
+  })
+  if (!response.ok) {
+    throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
+  }
+  const payload = (await response.json().catch(() => null)) as
+    | { choices?: { message?: ChatMessage }[]; error?: { message?: string } }
+    | null
+  const message = payload?.choices?.[0]?.message
+  const refs = (message ? extractChatImageRefs(message, { video: true }) : []).slice(0, 1)
+  if (refs.length === 0) {
+    // A 200 with text-only content is how a refusal, a safety block and a
+    // text-only model all look from here — quote the reply so the operator
+    // can tell them apart without re-running the spend.
+    const text = typeof message?.content === 'string' ? message.content : ''
+    const hint = text ? `：模型回复「${truncate(text, 120)}」` : ''
+    throw new ImagegenUpstreamError(`上游返回中没有视频数据${hint}`, 0, 502)
+  }
+  const ref = refs[0]
+  return ref.startsWith('data:')
+    ? decodeVideoDataUrl(ref)
+    : fetchVideoBytes(resolveMediaUrl(ref, provider, '视频'), provider, signal, fetchImpl)
 }

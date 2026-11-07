@@ -17,6 +17,8 @@ interface EmptyDropzoneProps {
   onViewAllHistory?: () => void
   /** Present only when the server exposes imagegen providers. */
   onOpenImageGen?: () => void
+  /** Present only when the server exposes video models. */
+  onOpenVideoGen?: () => void
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -34,6 +36,7 @@ export const EmptyDropzone: React.FC<EmptyDropzoneProps> = ({
   onSelectRecent,
   onViewAllHistory,
   onOpenImageGen,
+  onOpenVideoGen,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [isDragOver, setIsDragOver] = useState(false)
@@ -122,14 +125,27 @@ export const EmptyDropzone: React.FC<EmptyDropzoneProps> = ({
         )}
       </div>
 
-      {onOpenImageGen && (
-        <button
-          onClick={onOpenImageGen}
-          className="mt-5 flex items-center gap-2 px-4 py-2 rounded-full text-xs font-medium text-emerald-300 bg-emerald-950/40 border border-emerald-500/30 hover:bg-emerald-900/50 hover:border-emerald-400/50 transition-all"
-        >
-          <UiIcon name="sparkles" size={14} />
-          没有素材？用 AI 生成一张
-        </button>
+      {(onOpenImageGen || onOpenVideoGen) && (
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+          {onOpenImageGen && (
+            <button
+              onClick={onOpenImageGen}
+              className="flex items-center gap-2 px-4 py-2 rounded-full text-xs font-medium text-emerald-300 bg-emerald-950/40 border border-emerald-500/30 hover:bg-emerald-900/50 hover:border-emerald-400/50 transition-all"
+            >
+              <UiIcon name="sparkles" size={14} />
+              没有素材？用 AI 生成一张
+            </button>
+          )}
+          {onOpenVideoGen && (
+            <button
+              onClick={onOpenVideoGen}
+              className="flex items-center gap-2 px-4 py-2 rounded-full text-xs font-medium text-emerald-300 bg-emerald-950/40 border border-emerald-500/30 hover:bg-emerald-900/50 hover:border-emerald-400/50 transition-all"
+            >
+              <UiIcon name="film" size={14} />
+              用 AI 生成一段视频
+            </button>
+          )}
+        </div>
       )}
 
       {/* Recent Projects Shelf */}

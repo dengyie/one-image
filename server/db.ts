@@ -112,6 +112,13 @@ export function initDatabase(dbPath?: string): AppDatabase {
       PRIMARY KEY (client_key, day)
     );
 
+    CREATE TABLE IF NOT EXISTS videogen_usage (
+      client_key TEXT NOT NULL,
+      day TEXT NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY (client_key, day)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
     CREATE INDEX IF NOT EXISTS idx_cloud_projects_user_id ON cloud_projects(user_id);

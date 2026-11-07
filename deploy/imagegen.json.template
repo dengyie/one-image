@@ -1,0 +1,63 @@
+{
+  "providers": [
+    {
+      "id": "mangoapi",
+      "name": "MangoApi 生图",
+      "type": "openai-images",
+      "baseUrl": "https://api.mangoqwq.com/v1",
+      "apiKey": "REPLACE_WITH_PRODUCTION_NEWAPI_KEY",
+      "timeoutMs": 95000,
+      "mediaOrigin": "http://127.0.0.1:18000",
+      "defaultModel": "grok-imagine-image",
+      "models": [
+        {
+          "id": "grok-imagine-image",
+          "sizes": ["1024x1024", "1536x1024", "1024x1536"],
+          "edit": true,
+          "editsStyle": "xai-json",
+          "note": "最快 5-11s，尺寸三档真实可选，参考图走 xAI JSON 方言"
+        },
+        {
+          "id": "grok-imagine-image-2.0",
+          "sizes": ["1024x1024", "1536x1024", "1024x1536"],
+          "note": "高峰期 90s 零响应或 530，早间 11-47s"
+        },
+        {
+          "id": "gpt-image-2",
+          "sizes": ["1024x1024", "1536x1024", "1024x1536"],
+          "note": "约 44s，尊重尺寸"
+        },
+        {
+          "id": "gemini-3.1-flash-image",
+          "dialect": "gemini",
+          "edit": true,
+          "fixedSizeNote": "固定 1:1 方形输出",
+          "generationConfig": { "responseModalities": ["TEXT", "IMAGE"] },
+          "note": "约 30-95s；接受参考图；Google 渠道产物自带 SynthID 水印"
+        },
+        {
+          "id": "grok-imagine-video",
+          "dialect": "openai-chat-video",
+          "note": "约 40-50s 一段，同步返回"
+        },
+        {
+          "id": "grok-imagine-video-1.5",
+          "dialect": "openai-chat-video",
+          "note": "约 50s 一段，同步返回"
+        }
+      ],
+      "disabledModels": [
+        { "id": "gpt-image-1", "reason": "网关 default 分组无可用渠道（目录在、调用必 500，2026-11-04 实测）" },
+        { "id": "gpt-image-1.5", "reason": "网关 default 分组无可用渠道（2026-11-04 实测）" },
+        { "id": "gpt-image-2.5-4k", "reason": "网关 default 分组无可用渠道（2026-11-04 实测）" },
+        { "id": "gpt-image-2.5", "reason": "单张 >120s，超 Cloudflare ~100s 边缘与 95s 上游预算，上线即必死按钮" },
+        { "id": "grok-imagine-image-edit", "reason": "网关无渠道；编辑面由基模 grok-imagine-image + xai-json 承担" },
+        { "id": "grok-imagine-image-lite", "reason": "实测会 503，不稳定" },
+        { "id": "grok-imagine-image-quality", "reason": "grok-official 分组未放通，503" },
+        { "id": "grok-imagine", "reason": "500，非可用图片模型" },
+        { "id": "nano-banana-2-lite", "reason": "上游无可用渠道（2026-11-04 实测 500）" },
+        { "id": "nano-banana-pro", "reason": "上游无可用渠道（2026-11-04 实测 500）" }
+      ]
+    }
+  ]
+}
