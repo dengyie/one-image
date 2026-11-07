@@ -174,6 +174,30 @@ function clientStatusFor(upstreamStatus: number): number {
   return 502
 }
 
+// The operator's outbound path to the gateway (a proxy tunnel on the deploy
+// host) intermittently drops connection *establishment*: TLS EOF,
+// ConnectTimeout, ETIMEDOUT. Those failures happen before any bytes reach the
+// upstream, so the request was neither processed nor billed there — one
+// immediate retry is safe (no double generation, no double spend) and covers
+// the repeatedly observed "transient, passes on retry" pattern. Real upstream
+// errors arrive as HTTP responses and are never retried, and an exhausted
+// request budget still surfaces as the original timeout.
+function isConnectPhaseFailure(err: unknown): boolean {
+  if (!(err instanceof TypeError)) return false
+  const cause = (err as { cause?: unknown }).cause
+  const text = `${err.message} ${cause instanceof Error ? `${cause.name}: ${cause.message}` : ''}`
+  return /ConnectTimeoutError|socket disconnected before secure TLS|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|Other side closed|connect timeout/i.test(text)
+}
+
+async function upstreamFetch(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetchImpl(url, init)
+  } catch (err) {
+    if (!isConnectPhaseFailure(err)) throw err
+  }
+  return fetchImpl(url, init)
+}
+
 // A media origin rewritten to a loopback/mesh address must be reached
 // directly. The server sets a global ProxyAgent from HTTPS_PROXY for its
 // public upstreams, and routing 127.0.0.1 through that proxy depends on the
@@ -189,7 +213,7 @@ async function fetchImageBytes(url: URL, provider: ImagegenProviderConfig, signa
   // The key stays on the operator's own upstream host; third-party CDN hosts
   // and the media origin get an unauthenticated download.
   const apiKey = url.host === new URL(provider.baseUrl).host ? provider.apiKey : null
-  const response = await fetchImpl(url.toString(), {
+  const response = await upstreamFetch(fetchImpl, url.toString(), {
     headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
     signal,
     ...(isPrivateHost(url.hostname) ? { dispatcher: directDispatcher } : {}),
@@ -213,7 +237,7 @@ function mimeOf(contentType: string | null | undefined): string {
 // a container-sniffed mime instead of image dimensions.
 async function fetchVideoBytes(url: URL, provider: ImagegenProviderConfig, signal: AbortSignal, fetchImpl: typeof fetch): Promise<VideoGenResult> {
   const apiKey = url.host === new URL(provider.baseUrl).host ? provider.apiKey : null
-  const response = await fetchImpl(url.toString(), {
+  const response = await upstreamFetch(fetchImpl, url.toString(), {
     headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
     signal,
     ...(isPrivateHost(url.hostname) ? { dispatcher: directDispatcher } : {}),
@@ -435,7 +459,7 @@ async function generateOpenAIImages(
   if (params.image) return editOpenAIImages(provider, params, spec, params.image, signal, fetchImpl)
   const body: Record<string, unknown> = { model: params.model, prompt: params.prompt, n: params.n }
   if (params.size) body.size = params.size
-  const response = await fetchImpl(`${provider.baseUrl}/images/generations`, {
+  const response = await upstreamFetch(fetchImpl, `${provider.baseUrl}/images/generations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -491,7 +515,7 @@ async function editOpenAIImages(
     // Only the key is set by hand: fetch writes the multipart boundary itself.
     body = form
   }
-  const response = await fetchImpl(endpoint, {
+  const response = await upstreamFetch(fetchImpl, endpoint, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${provider.apiKey}`,
@@ -533,7 +557,7 @@ async function generateGemini(
   const generateOnce = async (): Promise<GeneratedImage[]> => {
     const parts: Record<string, unknown>[] = [{ text: params.prompt }]
     if (params.image) parts.push({ inlineData: { mimeType: params.image.mimeType, data: params.image.base64 } })
-    const response = await fetchImpl(`${geminiBase}/v1beta/models/${encodeURIComponent(params.model)}:generateContent`, {
+    const response = await upstreamFetch(fetchImpl, `${geminiBase}/v1beta/models/${encodeURIComponent(params.model)}:generateContent`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -692,7 +716,7 @@ async function generateOpenAIChatImage(
   fetchImpl: typeof fetch
 ): Promise<ImagegenResult> {
   const generateOnce = async (): Promise<GeneratedImage[]> => {
-    const response = await fetchImpl(`${provider.baseUrl}/chat/completions`, {
+    const response = await upstreamFetch(fetchImpl, `${provider.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -772,7 +796,7 @@ export async function generateVideo(
   if (!spec || spec.dialect !== 'openai-chat-video') {
     throw new ImagegenUpstreamError(`模型 ${params.model} 不是该服务的视频模型`, 0, 400)
   }
-  const response = await fetchImpl(`${provider.baseUrl}/chat/completions`, {
+  const response = await upstreamFetch(fetchImpl, `${provider.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
