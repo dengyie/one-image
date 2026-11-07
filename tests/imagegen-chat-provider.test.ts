@@ -460,3 +460,54 @@ describe('openai-chat-video product validation', () => {
     expect(bodyRead).toBeDefined()
   })
 })
+
+describe('connect-phase retry', () => {
+  const connectError = () => {
+    const err = new TypeError('fetch failed')
+    err.cause = new Error('Client network socket disconnected before secure TLS connection was established')
+    return err
+  }
+  const callsOf = (fetchImpl: unknown) => (fetchImpl as unknown as { mock: { calls: unknown[] } }).mock.calls
+
+  it('retries once when connection establishment drops, then succeeds', async () => {
+    const p = provider()
+    let attempt = 0
+    const fetchImpl = vi.fn(async () => {
+      attempt += 1
+      if (attempt === 1) throw connectError()
+      return chatReply('![image](data:image/png;base64,AAAA)')
+    }) as unknown as typeof fetch
+    const result = await generateImages(p, { model: 'grok-imagine-image', prompt: 'p', n: 1 }, AbortSignal.timeout(5000), fetchImpl)
+    expect(result.images).toHaveLength(1)
+    expect(callsOf(fetchImpl)).toHaveLength(2)
+  })
+
+  it('does not retry a real upstream error (HTTP response) or a non-connect failure', async () => {
+    const p = provider()
+    const httpError = vi.fn(async () => new Response(JSON.stringify({ error: { message: 'no channel' } }), { status: 500 })) as unknown as typeof fetch
+    await expect(generateImages(p, { model: 'grok-imagine-image', prompt: 'p', n: 1 }, AbortSignal.timeout(5000), httpError)).rejects.toThrow(/no channel/)
+    expect(callsOf(httpError)).toHaveLength(1)
+
+    const hardError = vi.fn(async () => { throw new Error('boom') }) as unknown as typeof fetch
+    await expect(generateImages(p, { model: 'grok-imagine-image', prompt: 'p', n: 1 }, AbortSignal.timeout(5000), hardError)).rejects.toThrow('boom')
+    expect(callsOf(hardError)).toHaveLength(1)
+  })
+
+  it('retries the media download on the video path', async () => {
+    const p = provider({ mediaOrigin: 'http://10.0.0.5:18000', modelSpecs: [{
+      id: 'grok-imagine-video', dialect: 'openai-chat-video', sizes: [], fixedSizeNote: null, edit: false, editsStyle: 'multipart', note: null, timeoutMs: 90_000,
+    }] })
+    const mp4 = Buffer.concat([Buffer.from([0x00, 0x00, 0x00, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(8, 9)])
+    let downloads = 0
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).includes('/chat/completions')) return chatReply('[video](http://10.0.0.5:18000/v1/media/videos/vid_1)')
+      downloads += 1
+      if (downloads === 1) throw connectError() // first download attempt
+      return new Response(mp4, { status: 200, headers: { 'content-type': 'video/mp4' } })
+    }) as unknown as typeof fetch
+    const result = await generateVideo(p, { model: 'grok-imagine-video', prompt: 'p' }, AbortSignal.timeout(5000), fetchImpl)
+    expect(result.mimeType).toBe('video/mp4')
+    // chat POST + failed download + retried download
+    expect(callsOf(fetchImpl)).toHaveLength(3)
+  })
+})
