@@ -991,6 +991,13 @@ export function App() {
   const handleRunErase = useCallback(async (eraseType: WatermarkEraseType, modeOverride?: SmartEraseMode) => {
     const state = sessionState(sessionRef.current)
     if (!decodedSource || !file || !state) return
+    // The one-click cleanup swaps the active document mid-run; the erase
+    // snapshot would land on a doc the user is no longer looking at. Cheap to
+    // refuse, confusing to interleave.
+    if (isOneClickCleaning || isPreparingRegen) {
+      showToast('正在执行一键去水印，请等待完成后再使用智能修复', 'info')
+      return
+    }
     const aiLayers = (state.annotations ?? []).filter((layer) => layer.type === 'erase-ai' && layer.rect)
     if (aiLayers.length === 0) {
       showToast('请先涂抹或框选水印', 'info')
@@ -1135,7 +1142,7 @@ export function App() {
       setIsSmartErasing(false)
       setSmartEraseStage(null)
     }
-  }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode])
+  }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode, isOneClickCleaning, isPreparingRegen])
 
   // Lossless metadata cleanup, shared by the standalone strip button and the
   // one-click watermark entry. Pristine files get pure container surgery
@@ -1236,20 +1243,34 @@ export function App() {
   // report points at the manual 换源重绘 instead of promising removal.
   const handleOneClickCleanWatermark = useCallback(async () => {
     if (!file) return
+    if (isSmartErasing) {
+      showToast('正在执行智能修复，请等待完成后再使用一键去水印', 'info')
+      return
+    }
     setIsOneClickCleaning(true)
     setProvenanceError(null)
     try {
       let geminiSignal = false
       let scanFailed = false
-      try {
-        const result = await checkProvenance(createProvenanceInput(file, file.name))
+      // One safe retry: the scan is a plain browser fetch across the edge, and
+      // a transient connect failure must not downgrade the report to "unknown"
+      // when a second attempt would answer. Same philosophy as the server's
+      // connect-phase upstream retry (PR #43).
+      let result: Awaited<ReturnType<typeof checkProvenance>> | null = null
+      for (let attempt = 0; attempt < 2 && !result; attempt += 1) {
+        try {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1500))
+          result = await checkProvenance(createProvenanceInput(file, file.name))
+        } catch (err: unknown) {
+          console.error(`One-click provenance scan failed (attempt ${attempt + 1}):`, err)
+          if (attempt === 1) scanFailed = true
+        }
+      }
+      if (result) {
         setProvenanceResultDetail(result)
         const upstreamSynthid = result.evidence.some((e) => e.signal === 'synthid' && e.outcome === 'detected')
         const declared = (result.selfDeclared ?? []).some((s) => /synthid|google generative ai/i.test(s.statement))
         geminiSignal = upstreamSynthid || declared
-      } catch (err: unknown) {
-        console.error('One-click provenance scan failed:', err)
-        scanFailed = true
       }
       const cleaned = await buildCleanedFile()
       const opened = await openCleanedDocument(cleaned)
@@ -1260,9 +1281,16 @@ export function App() {
           `${scanNote}元数据层已无损清理。此图带像素级 SynthID（Google 生成）——像素水印无法无损去除，官方检测仍会命中；需要能过检测的版本请到「水印 → 测试」用换源重绘。`,
           'info'
         )
+      } else if (scanFailed) {
+        // Never claim "not detected" when the scan did not answer — say what
+        // is known and where to get a real verdict.
+        showToast(
+          `${scanNote}已无损清理元数据层${cleaned.removed.length ? `（${cleaned.removed.join('、')}）` : ''}；像素级水印未能判定，请用「水印 → 测试」的检测原图确认`,
+          'info'
+        )
       } else {
         showToast(
-          `${scanNote}已无损清理元数据层${cleaned.removed.length ? `（${cleaned.removed.join('、')}）` : ''}；未发现像素级 AI 水印信号，像素未作算法修改`,
+          `已无损清理元数据层${cleaned.removed.length ? `（${cleaned.removed.join('、')}）` : ''}；未发现像素级 AI 水印信号，像素未作算法修改`,
           'success'
         )
       }
@@ -1272,35 +1300,7 @@ export function App() {
     } finally {
       setIsOneClickCleaning(false)
     }
-  }, [file, buildCleanedFile, openCleanedDocument, showToast])
-
-  // 换源重绘 prefill: caption the original, then open the generator with the
-  // description seeded and no reference. The generation itself (and its quota
-  // spend) stays a manual click in the modal — this handler only prepares.
-  const handleOpenRegenerate = useCallback(async () => {
-    if (!file) return
-    setIsPreparingRegen(true)
-    setRegenSeed(null)
-    try {
-      let caption: string | null = null
-      try {
-        const prepared = await prepareReferenceImage({ blob: Promise.resolve(file), mimeType: file.type || 'image/png' })
-        const result = await captionImage({ image: { mimeType: prepared.mimeType, base64: prepared.base64 }, timeoutMs: 45_000 })
-        if (result.ok && result.data?.caption) caption = result.data.caption
-        else showToast(`自动描述失败：${result.message ?? '未知原因'}；可手动描述画面后生成`, 'info')
-      } catch (err: unknown) {
-        console.error('Caption prefill failed:', err)
-        showToast('自动描述失败；可手动描述画面后生成', 'info')
-      }
-      if (caption) {
-        setRegenSeed({ prompt: caption, nonce: Date.now() })
-        showToast('已根据原图生成画面描述。生成的是不带参考图的新图——可过官方检测，但画面是重绘而非原图。', 'info')
-      }
-      setShowImageGenModal(true)
-    } finally {
-      setIsPreparingRegen(false)
-    }
-  }, [file, showToast])
+  }, [file, isSmartErasing, buildCleanedFile, openCleanedDocument, showToast])
 
   // Restoring a local draft is a document switch, so it joins the undo tree:
   // the image that was open stays one undo away.
@@ -1500,6 +1500,46 @@ export function App() {
       mimeType: 'image/png',
     }
   }, [decodedSource, currentState, factory])
+
+  // 换源重绘 prefill: caption what the user is looking at (the edited canvas
+  // when edits exist, the original otherwise), then open the generator with
+  // the description seeded and no reference. The generation itself (and its
+  // quota spend) stays a manual click in the modal — this handler only prepares.
+  const handleOpenRegenerate = useCallback(async () => {
+    if (!file) return
+    if (isSmartErasing) {
+      showToast('正在执行智能修复，请等待完成后再使用换源重绘', 'info')
+      return
+    }
+    setIsPreparingRegen(true)
+    setRegenSeed(null)
+    try {
+      let caption: string | null = null
+      try {
+        // The edited canvas is the honest subject: a crop or recolour must not
+        // come back in the regenerated image as the uncropped original.
+        const ref = await getCurrentReference().catch(() => null)
+        const source: { blob: Promise<Blob>; mimeType: string } = ref ?? {
+          blob: Promise.resolve(file),
+          mimeType: file.type || 'image/png',
+        }
+        const prepared = await prepareReferenceImage(source)
+        const result = await captionImage({ image: { mimeType: prepared.mimeType, base64: prepared.base64 }, timeoutMs: 45_000 })
+        if (result.ok && result.data?.caption) caption = result.data.caption
+        else showToast(`自动描述失败：${result.message ?? '未知原因'}；可手动描述画面后生成`, 'info')
+      } catch (err: unknown) {
+        console.error('Caption prefill failed:', err)
+        showToast('自动描述失败；可手动描述画面后生成', 'info')
+      }
+      if (caption) {
+        setRegenSeed({ prompt: caption, nonce: Date.now() })
+        showToast('已根据当前画面生成描述。生成的是不带参考图的新图——可过官方检测，但画面是重绘而非原图。', 'info')
+      }
+      setShowImageGenModal(true)
+    } finally {
+      setIsPreparingRegen(false)
+    }
+  }, [file, isSmartErasing, getCurrentReference, showToast])
 
   // Total local cache size bytes
   const totalStorageBytes = useMemo(() => {
