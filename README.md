@@ -5,13 +5,15 @@
 **High-Performance Local-First Image Processing Workbench & C2PA Provenance Engine**
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
-[![React](https://img.shields.io/badge/React-19.3-blue.svg?style=flat-square&logo=react&logoColor=white)](https://react.dev/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-7.0-blue.svg?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-8.3-purple.svg?style=flat-square&logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Fastify](https://img.shields.io/badge/Fastify-5.12-black.svg?style=flat-square&logo=fastify&logoColor=white)](https://fastify.dev/)
+[![React](https://img.shields.io/badge/React-19.3-61DAFB.svg?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-7.0-3178C6.svg?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/Vite-8.3-646CFF.svg?style=flat-square&logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind-v4-06B6D4.svg?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
+[![Fastify](https://img.shields.io/badge/Fastify-5.12-000000.svg?style=flat-square&logo=fastify&logoColor=white)](https://fastify.dev/)
+[![ONNX Runtime](https://img.shields.io/badge/ONNX-WebGPU%20%7C%20WASM-005CED.svg?style=flat-square&logo=onnx&logoColor=white)](https://onnxruntime.ai/)
 [![Tests](https://img.shields.io/badge/vitest-passing-brightgreen.svg?style=flat-square)]()
 
-[English](./README.md) • [Architecture](#layout) • [Deployment](#run)
+[English](./README.md) · [简体中文](./README.zh-CN.md) · [Architecture](#layout) · [Deployment](#run)
 
 </div>
 
@@ -71,7 +73,7 @@ deployed independently; OneImage does not depend on it at runtime. A normal clon
 contains the package:
 
 ```bash
-git clone https://github.com/dengyie/oneimage.git
+git clone https://github.com/dengyie/one-image.git
 ```
 
 ## Layout
