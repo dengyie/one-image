@@ -1,6 +1,27 @@
+<div align="center">
+
 # OneImage
 
-OneImage is a local-first image workbench. P0 tools run in the browser and do not upload the source image. Remote AI and provenance providers are isolated behind server-side adapters so browser code never receives provider secrets.
+**High-Performance Local-First Image Processing Workbench & C2PA Provenance Engine**
+
+[![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
+[![React](https://img.shields.io/badge/React-19.3-blue.svg?style=flat-square&logo=react&logoColor=white)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-7.0-blue.svg?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/Vite-8.3-purple.svg?style=flat-square&logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Fastify](https://img.shields.io/badge/Fastify-5.12-black.svg?style=flat-square&logo=fastify&logoColor=white)](https://fastify.dev/)
+[![Tests](https://img.shields.io/badge/vitest-passing-brightgreen.svg?style=flat-square)]()
+
+[English](./README.md) • [Architecture](#layout) • [Deployment](#run)
+
+</div>
+
+---
+
+## Overview
+
+**OneImage** is a privacy-first, local-in-browser image processing workbench and C2PA / SynthID content provenance verification engine.
+
+All core image manipulations (format conversion, high-ratio compression, resizing, visible watermarking, and metadata EXIF stripping) execute strictly inside the client's browser using OffscreenCanvas and Web Workers — zero image bytes leave the local machine. Remote AI operations and digital provenance checks are strictly isolated behind server-side proxy adapters, ensuring upstream API credentials never leak into client code.
 
 ## Current implementation
 
