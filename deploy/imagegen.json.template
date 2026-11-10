@@ -29,6 +29,12 @@
           "note": "约 44s，尊重尺寸"
         },
         {
+          "id": "gpt-image-1",
+          "sizes": ["1024x1024", "1536x1024", "1024x1536"],
+          "edit": true,
+          "note": "约 27-40s，尊重尺寸，支持参考图（multipart 原生方言）；2026-11-11 渠道恢复实测"
+        },
+        {
           "id": "gemini-3.1-flash-image",
           "dialect": "gemini",
           "edit": true,
@@ -48,7 +54,6 @@
         }
       ],
       "disabledModels": [
-        { "id": "gpt-image-1", "reason": "网关 default 分组无可用渠道（目录在、调用必 500，2026-11-04 实测）" },
         { "id": "gpt-image-1.5", "reason": "网关 default 分组无可用渠道（2026-11-04 实测）" },
         { "id": "gpt-image-2.5-4k", "reason": "网关 default 分组无可用渠道（2026-11-04 实测）" },
         { "id": "gpt-image-2.5", "reason": "单张 >120s，超 Cloudflare ~100s 边缘与 95s 上游预算，上线即必死按钮" },
