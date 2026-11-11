@@ -101,12 +101,13 @@ describe('LamaProcessPool lifecycle', () => {
   })
 
   it('retries once when the child dies mid-run, then succeeds', async () => {
-    const { pool, spawned, behavior } = makePool({ ready: true, result: true })
+    // Child #1 never answers the run: the request is deterministically
+    // in-flight when the OOM kill lands (an auto-reply would race the kill).
+    const { pool, spawned, behavior } = makePool({ ready: true, result: false })
     const pending = pool.run(INPUT)
-    // Let the handshake land first, then kill in-flight: the OOM kill on the
-    // resident session.
     await new Promise((resolve) => setTimeout(resolve, 5))
     spawned[0].exit(137)
+    behavior.result = true
     const result = await pending
     expect(result.tiles).toBe(1)
     // The retry went through a fresh child with its own run message.
