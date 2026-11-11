@@ -89,6 +89,11 @@ jobs:
           # runner has ample memory. --dereference keeps the archive free of
           # the relative symlinks npm creates under node_modules/.bin.
           ( cd release && npm ci --omit=dev --ignore-scripts --no-audit --no-fund )
+          # onnxruntime-node ships every platform's native bindings; the pxed
+          # runtime is linux/x64 only, so prune the rest before tarring
+          # (~247MB unpacked -> 32MB). The LaMa model itself lives on the host
+          # (ONEIMAGE_LAMA_MODEL_PATH) and never enters the archive.
+          rm -rf release/node_modules/onnxruntime-node/bin/napi-v6/darwin                  release/node_modules/onnxruntime-node/bin/napi-v6/win32                  release/node_modules/onnxruntime-node/bin/napi-v6/linux/arm64
           tar -C release --dereference -czf "oneimage-${RELEASE_SHA}.tar.gz" .
           sha256sum "oneimage-${RELEASE_SHA}.tar.gz" > "oneimage-${RELEASE_SHA}.tar.gz.sha256"
       - name: Upload release artifacts

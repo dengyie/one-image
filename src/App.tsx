@@ -78,6 +78,8 @@ import { refineMaskToStrokes } from './infrastructure/inpaint/mask-refine'
 import { stripImageMetadata } from './application/image-metadata-stripper'
 import { countHolePixels } from './infrastructure/inpaint/classical-fill'
 import { routeFill, resolveEraseProvider, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
+import { compositeRgba } from './infrastructure/inpaint/inpaint-core'
+import { computeLamaCropRect, encodeLamaCrop, postServerLama, blobToBase64 } from './infrastructure/inpaint/lama-client'
 import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, resolveCompareSource, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
@@ -157,6 +159,10 @@ export function App() {
   // it has its own modal and never enters the bitmap workspace.
   const [showVideoGenModal, setShowVideoGenModal] = useState(false)
   const [videogenEnabled, setVideogenEnabled] = useState(false)
+  // Server-side smart-erase (LaMa) availability, probed alongside the
+  // imagegen surface; the toolbar hides the 高质量 tier when the host lacks
+  // the deployed model.
+  const [serverLamaAvailable, setServerLamaAvailable] = useState(false)
   // Smart erase (browser-local fillers: diffusion / Gaussian frost / optional MI-GAN)
   const [isSmartErasing, setIsSmartErasing] = useState(false)
   const [smartEraseStage, setSmartEraseStage] = useState<SmartEraseStage | null>(null)
@@ -342,6 +348,12 @@ export function App() {
         // clicking the button without one buys a guaranteed error toast.
         setImagegenCaptionEnabled(Boolean(caps?.providers.some((p) => p.captionModel)))
       })
+      void fetch('/api/v1/capabilities', { credentials: 'include' })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { smartErase?: { lamaAvailable?: boolean } } | null) => {
+          setServerLamaAvailable(data?.smartErase?.lamaAvailable === true)
+        })
+        .catch(() => undefined)
     }
     probe()
     window.addEventListener('focus', probe)
@@ -984,6 +996,7 @@ export function App() {
     solid: '实心遮蔽',
     classical: '本地扩散',
     migan: 'MI-GAN 合成',
+    lama: 'LaMa 服务端合成',
   }
 
   // modeOverride lets the one-click cleanup pin the routing to the safe local
@@ -1060,9 +1073,13 @@ export function App() {
       // Route the hole to a filler: the AI mode picks between local diffusion
       // and Gaussian frost by hole size (MI-GAN only when explicitly picked);
       // the other modes are their own filler.
+      // A stale 高质量 selection (server lost its model between renders) must
+      // not fall into a guaranteed-502 path — degrade to auto routing.
+      const effectiveMode: SmartEraseMode =
+        modeOverride ?? (eraseMode === 'lama' && !serverLamaAvailable ? 'auto' : eraseMode)
       const provider: FillProvider =
         eraseType === 'ai'
-          ? routeFill({ mode: modeOverride ?? eraseMode, mask: maskGrid, imageWidth: width, imageHeight: height }).provider
+          ? routeFill({ mode: effectiveMode, mask: maskGrid, imageWidth: width, imageHeight: height }).provider
           : resolveEraseProvider(eraseType)
 
       // Composite alpha: the working mask blurred twice so the interior stays
@@ -1081,28 +1098,82 @@ export function App() {
       const alphaData = alphaCtx.getImageData(0, 0, width, height)
 
       let result: ImageData
-      try {
-        result = await runSmartErase(
-          { image: imageData, mask: maskData, composite: alphaData, provider },
-          setSmartEraseStage
+      if (provider === 'lama') {
+        // Server tier: crop to the mask neighborhood, upload the pair, blend
+        // the returned fill through the same feathered composite. The canvases
+        // are still alive here (the classical retry below relies on that too).
+        setSmartEraseStage({ phase: 'upload' })
+        const rect = computeLamaCropRect(maskGrid)
+        if (!rect) {
+          showToast('选区为空：请先涂抹或框选水印', 'info')
+          return
+        }
+        const createBlob = (canvas: unknown): Promise<Blob> => {
+          const anyCanvas = canvas as {
+            convertToBlob?: (options?: { type: string }) => Promise<Blob>
+            toBlob?: (callback: (blob: Blob | null) => void, type?: string) => void
+          }
+          return anyCanvas.convertToBlob
+            ? anyCanvas.convertToBlob({ type: 'image/png' })
+            : new Promise<Blob>((resolve, reject) =>
+                anyCanvas.toBlob?.((b) => (b ? resolve(b) : reject(new Error('裁剪编码失败'))), 'image/png'),
+              )
+        }
+        const imageBlob = await encodeLamaCrop(imageCanvas as unknown as CanvasImageSource, rect, factory, createBlob)
+        const maskBlob = await encodeLamaCrop(refineCanvas as unknown as CanvasImageSource, rect, factory, createBlob)
+        setSmartEraseStage({ phase: 'inference', provider: 'lama' })
+        const response = await postServerLama(
+          { imageBase64: await blobToBase64(imageBlob), maskBase64: await blobToBase64(maskBlob) },
+          { timeoutMs: 110_000 },
         )
-      } catch (err) {
+        if (!response.ok || !response.data) {
+          throw new Error(response.message ?? '服务端修复失败')
+        }
+        const filledBlob = await (async () => {
+          const bytes = Uint8Array.from(atob(response.data!.image.base64), (ch) => ch.charCodeAt(0))
+          return new Blob([bytes], { type: 'image/png' })
+        })()
+        const filledBitmap = await createImageBitmap(filledBlob)
+        const filledCanvas = makeCanvas()
+        const filledCtx = ctxOf(filledCanvas)
+        filledCtx.imageSmoothingEnabled = rect.scale < 1
+        // The server answers at the encoded resolution; draw it back at the
+        // crop's original size so the composite stays in full-frame space.
+        filledCtx.drawImage(filledBitmap, rect.x, rect.y, rect.width, rect.height)
+        filledBitmap.close()
+        const filled = ctxOf(filledCanvas).getImageData(0, 0, width, height)
+        result = new ImageData(width, height)
+        result.data.set(
+          compositeRgba(
+            { data: imageData.data, width, height },
+            { data: filled.data, width, height },
+            { data: alphaData.data, width, height },
+          ),
+        )
+      } else {
+        try {
+          result = await runSmartErase(
+            { image: imageData, mask: maskData, composite: alphaData, provider },
+            setSmartEraseStage
+          )
+        } catch (err) {
         // The classical filler refuses pathologically large working sets; fall
         // back to the model rather than failing the whole edit. The failed run
         // transferred the caller's buffers away (they are detached now), so the
         // retry re-reads the very planes it received from the canvases that
         // produced them: imageCanvas holds the snapshot, refineCanvas the
         // tightened mask, alphaCanvas the feathered alpha.
-        if (provider !== 'classical') throw err
-        result = await runSmartErase(
-          {
-            image: ctxOf(imageCanvas).getImageData(0, 0, width, height),
-            mask: ctxOf(refineCanvas).getImageData(0, 0, width, height),
-            composite: ctxOf(alphaCanvas).getImageData(0, 0, width, height),
-            provider: 'migan',
-          },
-          setSmartEraseStage
-        )
+          if (provider !== 'classical') throw err
+          result = await runSmartErase(
+            {
+              image: ctxOf(imageCanvas).getImageData(0, 0, width, height),
+              mask: ctxOf(refineCanvas).getImageData(0, 0, width, height),
+              composite: ctxOf(alphaCanvas).getImageData(0, 0, width, height),
+              provider: 'migan',
+            },
+            setSmartEraseStage
+          )
+        }
       }
 
       const outCanvas = makeCanvas()
@@ -1815,6 +1886,7 @@ export function App() {
             eraseMaskShape={eraseMaskShape}
             eraseBrushSize={eraseBrushSize}
             eraseMode={eraseMode}
+            serverLamaAvailable={serverLamaAvailable}
             onEraseMaskShapeSelect={setEraseMaskShape}
             onEraseBrushSizeSelect={setEraseBrushSize}
             onEraseModeSelect={setEraseMode}

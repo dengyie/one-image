@@ -16,8 +16,17 @@ import { createOneMailMailer } from './onemail'
 import { loadImagegenConfig } from './imagegen-config'
 import { registerImagegenRoutes } from './imagegen-route'
 import { registerVideogenRoutes } from './videogen-route'
+import { registerSmartEraseRoutes, resolveLamaModelPath } from './smart-erase-route'
+import { CHILD_ENV_FLAG, prewarmLama, runLamaWorkerLoop } from './lama-inpaint'
 
 async function main(): Promise<void> {
+  // Child mode: this same bundle re-executed by the LaMa process pool runs a
+  // resident inference worker instead of the HTTP server, so a model-load OOM
+  // can never take the production API down with it.
+  if (process.env[CHILD_ENV_FLAG] === '1') {
+    await runLamaWorkerLoop(() => resolveLamaModelPath())
+    return
+  }
   // state_json carries the full serialized editor state (stroke point arrays
   // included); the default 1MiB body limit would reject legitimately heavy
   // annotation sessions, so the limit matches the 25MB input philosophy.
@@ -57,7 +66,14 @@ async function main(): Promise<void> {
     : undefined
 
   registerHealthRoute(app, { providerConfigured: Boolean(process.env.OPENAI_API_KEY) })
-  registerCapabilitiesRoute(app, { provenance: { enabled: Boolean(process.env.OPENAI_API_KEY), provider: process.env.OPENAI_API_KEY ? 'openai' : null, maxInputBytes } })
+  // Server-side smart-erase (LaMa): resolved from env + existsSync at boot —
+  // null degrades the surface to a 503 and hides the browser tier without
+  // blocking startup or touching the deploy health budget.
+  const lamaModelPath = resolveLamaModelPath()
+  registerCapabilitiesRoute(app, {
+    provenance: { enabled: Boolean(process.env.OPENAI_API_KEY), provider: process.env.OPENAI_API_KEY ? 'openai' : null, maxInputBytes },
+    smartErase: { lamaAvailable: lamaModelPath !== null },
+  })
   registerSameOriginGuard(app)
   registerAuthRoutes(app, appDb.db, { rateLimiter: authRateLimiter, mailer: verificationMailer })
   registerProjectRoutes(app, appDb.db, { rateLimiter: projectsRateLimiter })
@@ -88,6 +104,15 @@ async function main(): Promise<void> {
       allow: (request) => rateLimiter.allow(request),
     },
   )
+  // Server-side LaMa inpainting burns shared CPU on the container, so it gets
+  // its own tight window and its own durable daily ledger inside the route.
+  const rawSmartEraseCap = Number(process.env.ONEIMAGE_SMARTERASE_DAILY_CAP ?? 30)
+  const smartEraseRateLimiter = createRateLimiter({ windowMs: 60_000, maxRequestsPerWindow: 3, maxTrackedClients: 10_000 })
+  registerSmartEraseRoutes(app, appDb.db, {
+    modelPath: lamaModelPath,
+    rateLimiter: smartEraseRateLimiter,
+    dailyCap: Number.isFinite(rawSmartEraseCap) && rawSmartEraseCap >= 1 ? Math.floor(rawSmartEraseCap) : 30,
+  })
 
   const port = Number(process.env.PORT ?? 8787)
   let shuttingDown = false
@@ -106,6 +131,15 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => { void shutdown('SIGTERM') })
   process.once('SIGINT', () => { void shutdown('SIGINT') })
   await app.listen({ port, host: '127.0.0.1' })
+  // Warm the resident LaMa child in the background: loading the 198MB model
+  // at boot-time idle beats loading it under request pressure on a host that
+  // has already OOM-killed exactly that load once. Failures retry with
+  // backoff and never affect the server's availability.
+  if (lamaModelPath) {
+    void prewarmLama({ modelPath: lamaModelPath }).then((warmed) => {
+      app.log.info({ warmed }, 'lama prewarm finished')
+    })
+  }
 }
 
 main().catch((error: unknown) => {

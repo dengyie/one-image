@@ -171,6 +171,10 @@ async function run(req: SmartEraseRequest): Promise<ArrayBuffer> {
       case 'solid':
         generated = fillHolesSolid(imagePlane, maskPlane)
         break
+      case 'lama':
+        // Server-side filler: it is intercepted on the main thread before
+        // runSmartErase and never reaches the worker (no 198MB model here).
+        throw new Error('inpaint worker: lama runs server-side and never reaches the worker')
       default: {
         // Exhaustiveness anchor: a new FillProvider must add its own case.
         const unhandled: never = req.provider
