@@ -8,7 +8,10 @@ await mkdir(outputDirectory, { recursive: true })
 await build({
   bundle: true,
   entryPoints: ['server/index.ts'],
-  external: ['node:*'],
+  // onnxruntime-node must stay external: its glue resolves the platform
+  // .node binding relative to node_modules, and inlining it would break that
+  // path in the single-file bundle.
+  external: ['node:*', 'onnxruntime-node'],
   format: 'cjs',
   outfile: join(outputDirectory, 'index.cjs'),
   platform: 'node',

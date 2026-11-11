@@ -77,3 +77,25 @@ describe('resolveEraseProvider', () => {
     expect(resolveEraseProvider('pixel')).toBe('pixel')
   })
 })
+
+describe('server-side lama mode', () => {
+  const grid = (width: number, height: number, hole?: { x: number; y: number; w: number; h: number }) => {
+    const data = new Uint8ClampedArray(width * height * 4)
+    if (hole) {
+      for (let y = hole.y; y < hole.y + hole.h; y++) {
+        for (let x = hole.x; x < hole.x + hole.w; x++) {
+          data[(y * width + x) * 4] = 255
+        }
+      }
+    }
+    return { data, width, height }
+  }
+
+  it('routes the explicit lama mode to the server provider regardless of size', () => {
+    const decision = routeFill({ mode: 'lama', mask: grid(64, 64, { x: 0, y: 0, w: 2, h: 2 }), imageWidth: 64, imageHeight: 64 })
+    expect(decision.provider).toBe('lama')
+    // Even a large hole keeps the explicit pick — the tier is user-chosen.
+    const big = routeFill({ mode: 'lama', mask: grid(2048, 2048, { x: 0, y: 0, w: 2048, h: 2048 }), imageWidth: 2048, imageHeight: 2048 })
+    expect(big.provider).toBe('lama')
+  })
+})

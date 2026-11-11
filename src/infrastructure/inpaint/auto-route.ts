@@ -20,12 +20,13 @@
 import type { RgbaGrid } from './mask-refine'
 import { countHolePixels } from './classical-fill'
 
-export type FillProvider = 'classical' | 'migan' | 'blur' | 'pixel' | 'solid'
+export type FillProvider = 'classical' | 'migan' | 'blur' | 'pixel' | 'solid' | 'lama'
 /** What the user picked in the toolbar. The erase tab's blur/pixel/blackout
  * options map straight onto the last three; `routeFill` only ever returns the
  * first two for the smart-repair mode because routing must stay predictable
- * and model-free unless the user explicitly picks MI-GAN. */
-export type SmartEraseMode = 'auto' | 'classical' | 'migan'
+ * and model-free unless the user explicitly picks MI-GAN or the server-side
+ * LaMa tier. */
+export type SmartEraseMode = 'auto' | 'classical' | 'migan' | 'lama'
 
 export interface RouteInput {
   mode: SmartEraseMode
@@ -59,6 +60,11 @@ export function routeFill(input: RouteInput): RouteDecision {
   }
   if (input.mode === 'migan') {
     return { provider: 'migan', coverage, holePixels, reason: '已选择 MI-GAN 合成填充' }
+  }
+  if (input.mode === 'lama') {
+    // The server tier is gated on the capabilities probe before the toolbar
+    // ever shows the pill; routing itself stays model-free.
+    return { provider: 'lama', coverage, holePixels, reason: '已选择服务端 LaMa 高质量合成' }
   }
   if (holePixels === 0) {
     return { provider: 'classical', coverage, holePixels, reason: '选区为空，无需填充' }

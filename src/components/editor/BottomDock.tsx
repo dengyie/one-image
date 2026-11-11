@@ -76,6 +76,8 @@ interface BottomDockProps {
   eraseMaskShape: MosaicShape
   eraseBrushSize: number
   eraseMode: SmartEraseMode
+  /** Server-side LaMa tier availability, forwarded to the toolbar. */
+  serverLamaAvailable?: boolean
   onEraseMaskShapeSelect: (shape: MosaicShape) => void
   onEraseBrushSizeSelect: (size: number) => void
   onEraseModeSelect: (mode: SmartEraseMode) => void
@@ -156,6 +158,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   eraseMaskShape,
   eraseBrushSize,
   eraseMode,
+  serverLamaAvailable = false,
   onEraseMaskShapeSelect,
   onEraseBrushSizeSelect,
   onEraseModeSelect,
@@ -247,6 +250,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
             eraseMaskShape={eraseMaskShape}
             eraseBrushSize={eraseBrushSize}
             eraseMode={eraseMode}
+            serverLamaAvailable={serverLamaAvailable}
             onEraseMaskShapeSelect={onEraseMaskShapeSelect}
             onEraseBrushSizeSelect={onEraseBrushSizeSelect}
             onEraseModeSelect={onEraseModeSelect}

@@ -22,7 +22,7 @@ export function resolveUsageClientKey(request: FastifyRequest): string {
   return resolveClientKey(request.headers as ProxyHeaders, request.raw.socket.remoteAddress)
 }
 
-export function readUsage(db: DatabaseSync, table: 'imagegen_usage' | 'videogen_usage', clientKey: string, day: string): number {
+export function readUsage(db: DatabaseSync, table: 'imagegen_usage' | 'videogen_usage' | 'smarterase_usage', clientKey: string, day: string): number {
   const row = db.prepare(`SELECT count FROM ${table} WHERE client_key = ? AND day = ?`).get(clientKey, day) as
     | { count: number }
     | undefined
@@ -34,7 +34,7 @@ export function readUsage(db: DatabaseSync, table: 'imagegen_usage' | 'videogen_
 // failure path from being cheaper than the abuse path. The read-check-increment
 // runs without an await in between, so on this single-writer SQLite it is
 // atomic per event-loop turn.
-export function addUsage(db: DatabaseSync, table: 'imagegen_usage' | 'videogen_usage', clientKey: string, day: string, count: number): void {
+export function addUsage(db: DatabaseSync, table: 'imagegen_usage' | 'videogen_usage' | 'smarterase_usage', clientKey: string, day: string, count: number): void {
   db.prepare(
     `INSERT INTO ${table} (client_key, day, count) VALUES (?, ?, ?) ON CONFLICT(client_key, day) DO UPDATE SET count = count + excluded.count`
   ).run(clientKey, day, count)

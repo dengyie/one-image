@@ -26,5 +26,8 @@ export default defineConfig({
     restoreMocks: true,
     clearMocks: true,
     exclude: [...configDefaults.exclude, 'providers/**'],
+    // 46 concurrent workers flaked 7 tests on a memory-pressured dev box
+    // (all green on rerun): the suites are fast, a bounded pool is cheap.
+    maxWorkers: 8,
   },
 })

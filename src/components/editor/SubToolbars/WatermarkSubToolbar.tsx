@@ -33,6 +33,9 @@ export interface WatermarkSubToolbarProps {
   eraseBrushSize: number
   /** Which filler to use for the smart eraser. */
   eraseMode: SmartEraseMode
+  /** Server-side LaMa tier availability (capabilities probe); the pill is
+   * hidden when the host lacks the deployed model. */
+  serverLamaAvailable?: boolean
   onEraseMaskShapeSelect: (shape: MosaicShape) => void
   onEraseBrushSizeSelect: (size: number) => void
   onEraseModeSelect: (mode: SmartEraseMode) => void
@@ -52,6 +55,7 @@ const ERASE_MODES: Array<{ value: SmartEraseMode; label: string; hint: string }>
   { value: 'auto', label: '自动', hint: '按选区大小自动选择：小选区本地扩散，大选区高斯磨砂——均为纯本地算法，不下载模型、不重采样、不生成' },
   { value: 'classical', label: '快速', hint: '纯本地扩散填充：不下载模型、不重采样，掩膜外逐位不变' },
   { value: 'migan', label: '标准', hint: 'MI-GAN 合成填充（实验性）：仅建议平坦背景使用，纹理背景下可能出现明显色块；首次需下载 27MB 模型' },
+  { value: 'lama', label: '高质量', hint: '服务端 LaMa 合成填充：模型常驻服务器、浏览器零下载，大区域修复质量上限更高；仅选区区域会上传到服务器处理，掩膜外像素逐位不变' },
 ]
 
 const ERASE_TYPE_LABELS: Record<WatermarkEraseType, string> = {
@@ -93,6 +97,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
   eraseMaskShape,
   eraseBrushSize,
   eraseMode,
+  serverLamaAvailable = false,
   onEraseMaskShapeSelect,
   onEraseBrushSizeSelect,
   onEraseModeSelect,
@@ -336,7 +341,7 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
             <div className="flex items-center justify-between gap-2">
               <span className="text-[11px] text-zinc-400 w-14 shrink-0">填充引擎</span>
               <div className="flex items-center gap-1">
-                {ERASE_MODES.map((mode) => (
+                {ERASE_MODES.filter((mode) => mode.value !== 'lama' || serverLamaAvailable).map((mode) => (
                   <button
                     key={mode.value}
                     type="button"
@@ -357,7 +362,9 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
 
           <p className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-800/40 p-2 rounded-lg border border-emerald-900/40">
             {eraseType === 'ai'
-              ? `${ERASE_MODES.find((mode) => mode.value === eraseMode)?.hint}；掩膜外像素逐位保留，原图不上传。`
+              ? `${ERASE_MODES.find((mode) => mode.value === eraseMode)?.hint}；掩膜外像素逐位保留${
+                  eraseMode === 'lama' ? '，选区区域会上传到服务器处理' : '，原图不上传'
+                }。`
               : ERASE_TYPE_HINTS[eraseType]}
           </p>
 
@@ -377,11 +384,15 @@ export const WatermarkSubToolbar: React.FC<WatermarkSubToolbarProps> = ({
                     ? `下载模型 ${Math.round((smartEraseStage.loadedBytes ?? 0) / 1048576)}/${Math.round(smartEraseStage.totalBytes / 1048576)}MB`
                     : smartEraseStage?.phase === 'session'
                     ? '初始化推理引擎…'
+                    : smartEraseStage?.phase === 'upload'
+                    ? '上传选区到服务器…'
                     : smartEraseStage?.phase === 'inference'
                     ? smartEraseStage.provider === 'classical'
                       ? '正在扩散填充…'
                       : smartEraseStage.provider === 'blur'
                       ? '正在磨砂填充…'
+                      : smartEraseStage.provider === 'lama'
+                      ? '服务端 LaMa 合成中…'
                       : '正在合成修复…'
                     : '准备中…'}
                 </span>

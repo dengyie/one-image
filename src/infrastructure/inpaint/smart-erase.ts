@@ -24,6 +24,8 @@ export type SmartEraseStage =
   | { phase: 'model'; loadedBytes: number; totalBytes: number | null }
   | { phase: 'session' }
   | { phase: 'inference'; provider?: FillProvider }
+  // Server-side LaMa tier only: the crop is being uploaded for inference.
+  | { phase: 'upload' }
 
 // Minimal structural contract so tests can inject a fake worker; a real
 // Worker satisfies it as-is. Handlers are EventListener-typed because the DOM
