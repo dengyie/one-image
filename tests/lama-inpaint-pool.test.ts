@@ -153,6 +153,38 @@ describe('LamaProcessPool lifecycle', () => {
     expect(spawned).toHaveLength(1)
     expect(spawned[0].sent.filter((m) => m.type === 'run')).toHaveLength(2)
   })
+
+  it('tracks warm state across prewarm, serving, and child death', async () => {
+    const { pool, spawned, behavior } = makePool({ ready: true })
+    expect(pool.isWarm()).toBe(false)
+    // A completed run proves the session can serve: child #1 dies mid-run
+    // (deterministically silent), the bounded retry lands on child #2.
+    const pending = pool.run(INPUT)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    behavior.result = true
+    spawned[0].exit(137)
+    await pending
+    expect(pool.isWarm()).toBe(true)
+    // The child dying takes the tier away again.
+    spawned[1].exit(137)
+    expect(pool.isWarm()).toBe(false)
+  })
+
+  it('prewarm flips warm state only on a real warm handshake', async () => {
+    const { pool, spawned, behavior } = makePool({ ready: true, resultError: 'warm probe failed' })
+    const flips: boolean[] = []
+    pool.onWarmChange((warmed) => flips.push(warmed))
+    await expect(pool.prewarm(1, 1)).resolves.toBe(false)
+    expect(pool.isWarm()).toBe(false)
+    expect(flips).toEqual([])
+    // A fresh child (the failed one is gone) warms properly.
+    spawned[0].exit(1)
+    behavior.resultError = undefined
+    behavior.warmed = true
+    await expect(pool.prewarm(1, 1)).resolves.toBe(true)
+    expect(pool.isWarm()).toBe(true)
+    expect(flips).toEqual([true])
+  })
 })
 
 type LamaRunResultLike = Awaited<ReturnType<LamaProcessPool['run']>>

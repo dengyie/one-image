@@ -201,3 +201,43 @@ describe('smart-erase route', () => {
     appDb.close()
   })
 })
+
+describe('smart-erase warm gate', () => {
+  it('answers 503 warming (no billing, no rate spend) while no session is proven', async () => {
+    const runInpaint = vi.fn(async (input: { width: number; height: number; image: Uint8Array; mask: Uint8Array }) => ({
+      rgba: new Uint8Array(input.width * input.height * 4),
+      ms: 1,
+      tiles: 1,
+    }))
+    const limiter = createRateLimiter({ windowMs: 60_000, maxRequestsPerWindow: 1, maxTrackedClients: 100 })
+    const app = Fastify()
+    const appDb = initDatabase(':memory:')
+    registerSmartEraseRoutes(app, appDb.db, {
+      modelPath: '/models/lama_fp32.onnx',
+      isWarm: () => false,
+      rateLimiter: limiter,
+      dailyCap: 5,
+      runInpaint,
+    })
+    const payload = {
+      image: { base64: solidPng(256, 128, [1, 2, 3]).toString('base64') },
+      mask: { base64: maskPng(256, 128, { x: 0, y: 0, w: 16, h: 16 }).toString('base64') },
+    }
+    const res = await app.inject({ method: 'POST', url: '/api/v1/smart-erase', payload })
+    expect(res.statusCode).toBe(503)
+    expect(JSON.parse(res.body).error).toBe('smart_erase_warming')
+    expect(runInpaint).not.toHaveBeenCalled()
+    // The warm gate sits before the spend surfaces: the window is untouched.
+    const warmApp = Fastify()
+    registerSmartEraseRoutes(warmApp, appDb.db, {
+      modelPath: '/models/lama_fp32.onnx',
+      isWarm: () => true,
+      rateLimiter: limiter,
+      dailyCap: 5,
+      runInpaint,
+    })
+    const ok = await warmApp.inject({ method: 'POST', url: '/api/v1/smart-erase', payload })
+    expect(ok.statusCode).toBe(200)
+    appDb.close()
+  })
+})

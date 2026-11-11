@@ -14,6 +14,10 @@ export interface SmartEraseRouteOptions {
   // and its own durable daily ledger, separate from the generation surfaces.
   rateLimiter?: RateLimiter
   dailyCap: number
+  // Live warm gate: false while no proven session is resident (503, never a
+  // misleading 500). Optional for tests; the pool-backed default is wired in
+  // server/index.ts.
+  isWarm?: () => boolean
   // Test injection: swap the real ORT run for a fake.
   runInpaint?: typeof runLamaInpaint
 }
@@ -59,6 +63,13 @@ export function registerSmartEraseRoutes(app: FastifyInstance, db: DatabaseSync,
   }>, reply: FastifyReply) => {
     if (!options.modelPath) {
       return reply.status(503).send({ error: 'smart_erase_unconfigured', message: '服务端修复模型未配置' })
+    }
+    // The warm gate: without a proven resident session a run would almost
+    // certainly OOM mid-flight on the memory-starved host. Answer 503 (the
+    // capabilities flag hides the tier for browsers; this catches stale UIs
+    // and direct callers) instead of burning a billed attempt on a 500.
+    if (options.isWarm && !options.isWarm()) {
+      return reply.status(503).send({ error: 'smart_erase_warming', message: '服务端修复引擎预热中，请稍后再试' })
     }
     if (rateLimiter && !rateLimiter.allow(request)) {
       return reply.header('Retry-After', '60').status(429).send({

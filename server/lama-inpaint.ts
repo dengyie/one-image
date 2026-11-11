@@ -202,12 +202,30 @@ export class LamaProcessPool {
   private spawning: Promise<ChildLike> | null = null
   private pending = new Map<number, PendingRequest>()
   private nextId = 1
+  private warmed = false
+  private warmListeners = new Set<(warmed: boolean) => void>()
 
   constructor(
     private modelPath: string,
     private entryPath: string,
     private forkFn: ForkFn = defaultFork,
   ) {}
+
+  /** Whether a proven session is resident right now. */
+  isWarm(): boolean {
+    return this.warmed && this.child !== null && !this.child.exited
+  }
+
+  /** Subscribe to warm-state flips (capabilities honesty gate). */
+  onWarmChange(listener: (warmed: boolean) => void): void {
+    this.warmListeners.add(listener)
+  }
+
+  private setWarm(warmed: boolean): void {
+    if (this.warmed === warmed) return
+    this.warmed = warmed
+    for (const listener of this.warmListeners) listener(warmed)
+  }
 
   /** Test hook: forget the child so the next request respawns. */
   dispose(): void {
@@ -245,6 +263,7 @@ export class LamaProcessPool {
           child.on('exit', onExit)
           child.send({ type: 'warm' })
         })
+        this.setWarm(true)
         return true
       } catch {
         if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, backoffMs * attempt))
@@ -293,7 +312,12 @@ export class LamaProcessPool {
       if (timer) clearTimeout(timer)
       throw new Error('lama child exited during inference')
     }
-    return result
+    // A completed run is itself proof the session can serve (the prewarm
+    // probe proves it too) — used by the capabilities honesty gate.
+    return result.then((r) => {
+      this.setWarm(true)
+      return r
+    })
   }
 
   private async ensureChild(): Promise<ChildLike> {
@@ -317,6 +341,7 @@ export class LamaProcessPool {
       }
       child.on('exit', () => {
         exited = true
+        this.setWarm(false)
         // Fail everything in flight; the next request respawns a fresh child.
         for (const [id, pending] of this.pending) {
           clearTimeout(pending.timer)
@@ -380,6 +405,19 @@ export function prewarmLama(options: { modelPath: string; entryPath?: string }, 
   return poolFor(options).prewarm(attempts)
 }
 
+/** Whether a proven (create + full tile run) session is resident. */
+export function isLamaWarm(options: { modelPath: string; entryPath?: string }): boolean {
+  return poolFor(options).isWarm()
+}
+
+/** Subscribe to warm-state flips so surfaces can gate honestly. */
+export function onLamaWarmChange(
+  options: { modelPath: string; entryPath?: string },
+  listener: (warmed: boolean) => void,
+): void {
+  poolFor(options).onWarmChange(listener)
+}
+
 function poolFor(options: { modelPath: string; entryPath?: string }): LamaProcessPool {
   let target = pools.get(options.modelPath)
   if (!target) {
@@ -439,15 +477,23 @@ export async function runLamaWorkerLoop(getModelPath: () => string | null): Prom
             // Probe the full inference path, not just session creation: on
             // the memory-starved host the first run's arena burst has its
             // own OOM window, and a create-only warm would hand that death
-            // to the first real request as a 500. A zero mask makes the run
-            // an identity (pinned contract), so the probe is side-effect
-            // free — it just proves a tile can go through end to end.
-            await runLamaTiling(workerSession, ort, {
+            // to the first real request as a 500. The mask carries one real
+            // hole pixel — a zero mask would skip session.run entirely
+            // (holes-only tiling) and the probe would prove nothing. The
+            // output is discarded; only "one tile went through end to end"
+            // matters.
+            const probeMask = new Uint8Array(TILE * TILE * 4)
+            probeMask[0] = 255
+            probeMask[1] = 255
+            probeMask[2] = 255
+            probeMask[3] = 255
+            const probe = await runLamaTiling(workerSession, ort, {
               width: TILE,
               height: TILE,
               image: new Uint8Array(TILE * TILE * 4).fill(128),
-              mask: new Uint8Array(TILE * TILE * 4),
+              mask: probeMask,
             })
+            if (probe.tiles !== 1) throw new Error(`warm probe ran ${probe.tiles} tiles`)
             process.send?.({ type: 'warmed' })
           } catch (err) {
             process.send?.({ type: 'warm_failed', error: err instanceof Error ? err.message : String(err) })

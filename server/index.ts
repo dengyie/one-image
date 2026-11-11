@@ -3,7 +3,7 @@ import Fastify from 'fastify'
 import { OpenAIProvenanceAdapter } from '../src/infrastructure/openai-provenance-adapter'
 import { MAX_INPUT_BYTES } from '../src/domain/image-input'
 import { registerProvenanceRoute } from './provenance-route'
-import { registerCapabilitiesRoute } from './capabilities-route'
+import { registerCapabilitiesRoute, type PublicCapabilities } from './capabilities-route'
 import { authorizeProvenanceRequest } from './security'
 import { registerHealthRoute } from './health-route'
 import { configureOutboundProxy } from './proxy'
@@ -17,7 +17,13 @@ import { loadImagegenConfig } from './imagegen-config'
 import { registerImagegenRoutes } from './imagegen-route'
 import { registerVideogenRoutes } from './videogen-route'
 import { registerSmartEraseRoutes, resolveLamaModelPath } from './smart-erase-route'
-import { CHILD_ENV_FLAG, prewarmLama, runLamaWorkerLoop } from './lama-inpaint'
+import {
+  CHILD_ENV_FLAG,
+  isLamaWarm,
+  onLamaWarmChange,
+  prewarmLama,
+  runLamaWorkerLoop,
+} from './lama-inpaint'
 
 async function main(): Promise<void> {
   // Child mode: this same bundle re-executed by the LaMa process pool runs a
@@ -70,10 +76,19 @@ async function main(): Promise<void> {
   // null degrades the surface to a 503 and hides the browser tier without
   // blocking startup or touching the deploy health budget.
   const lamaModelPath = resolveLamaModelPath()
-  registerCapabilitiesRoute(app, {
+  // The flag is live: it flips on once a session is proven (create + a full
+  // tile run) and back off if the child dies, so the browser never shows a
+  // tier the host cannot currently serve.
+  const capabilities: PublicCapabilities = {
     provenance: { enabled: Boolean(process.env.OPENAI_API_KEY), provider: process.env.OPENAI_API_KEY ? 'openai' : null, maxInputBytes },
-    smartErase: { lamaAvailable: lamaModelPath !== null },
-  })
+    smartErase: { lamaAvailable: false },
+  }
+  registerCapabilitiesRoute(app, capabilities)
+  if (lamaModelPath) {
+    onLamaWarmChange({ modelPath: lamaModelPath }, (warmed) => {
+      capabilities.smartErase!.lamaAvailable = warmed
+    })
+  }
   registerSameOriginGuard(app)
   registerAuthRoutes(app, appDb.db, { rateLimiter: authRateLimiter, mailer: verificationMailer })
   registerProjectRoutes(app, appDb.db, { rateLimiter: projectsRateLimiter })
@@ -110,6 +125,7 @@ async function main(): Promise<void> {
   const smartEraseRateLimiter = createRateLimiter({ windowMs: 60_000, maxRequestsPerWindow: 3, maxTrackedClients: 10_000 })
   registerSmartEraseRoutes(app, appDb.db, {
     modelPath: lamaModelPath,
+    isWarm: () => (lamaModelPath ? isLamaWarm({ modelPath: lamaModelPath }) : false),
     rateLimiter: smartEraseRateLimiter,
     dailyCap: Number.isFinite(rawSmartEraseCap) && rawSmartEraseCap >= 1 ? Math.floor(rawSmartEraseCap) : 30,
   })
