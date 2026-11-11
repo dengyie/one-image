@@ -165,3 +165,24 @@ describe('lama-inpaint tiling', () => {
     expect(peak).toBeLessThanOrEqual(2)
   })
 })
+
+describe('warm probe contract', () => {
+  it('a single hole pixel runs exactly one tile (the probe mask runs the model)', async () => {
+    // The warm probe sends a one-hole mask; a zero mask would skip
+    // session.run entirely and prove nothing.
+    const width = 512
+    const height = 512
+    const image = solidPlane(width, height, [7, 7, 7])
+    const mask = new Uint8Array(width * height * 4)
+    mask[0] = 255
+    mask[1] = 255
+    mask[2] = 255
+    mask[3] = 255
+    const state: FakeSessionState = { calls: [] }
+    const { session, tensors } = fakeSession(state, [1, 2, 3])
+    const result = await runLamaTiling(session, tensors, { width, height, image, mask })
+    expect(state.calls).toHaveLength(1)
+    expect(result.tiles).toBe(1)
+    expect(result.rgba[0]).toBe(1)
+  })
+})
