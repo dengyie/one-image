@@ -10,7 +10,8 @@ import { AVATAR_COLORS, DEFAULT_AVATAR_COLOR, isAvatarColor } from '../src/domai
 const scrypt = promisify(scryptCallback) as (
   password: string | Buffer,
   salt: string | Buffer,
-  keylen: number
+  keylen: number,
+  options?: { N: number; r: number; p: number }
 ) => Promise<Buffer>
 
 export interface SafeUser {
@@ -34,14 +35,38 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
 
+// Password hashing: scrypt with explicit cost parameters. The stored hash is
+// self-describing (`s2$<hex>` = current params, bare hex = the historical
+// Node-default hash) so verifyPassword handles both without a migration, and
+// authenticateUser re-hashes legacy hashes on successful login.
+// N=2^16 (16MB per hash, 8x the Node default) instead of the OWASP 2^17: the
+// deploy host OOM-kills allocation bursts and login concurrency × 32MB is a
+// real risk there; revisit when the host has headroom. maxmem must cover the
+// 128*N*r working set — OpenSSL's 32MB default rejects N=2^16 outright.
+const SCRYPT_PARAMS = { N: 2 ** 16, r: 8, p: 1, maxmem: 96 * 1024 * 1024 }
+const SCRYPT_HASH_PREFIX = 's2$'
+
 export async function hashPassword(password: string, salt: string): Promise<string> {
-  return (await scrypt(password, salt, 64)).toString('hex')
+  return SCRYPT_HASH_PREFIX + (await scrypt(password, salt, 64, SCRYPT_PARAMS)).toString('hex')
+}
+
+export function needsPasswordRehash(storedHash: string): boolean {
+  return !storedHash.startsWith(SCRYPT_HASH_PREFIX)
 }
 
 export async function verifyPassword(password: string, salt: string, expectedHash: string): Promise<boolean> {
   try {
-    const computedBuf = Buffer.from(await hashPassword(password, salt), 'hex')
-    const expectedBuf = Buffer.from(expectedHash, 'hex')
+    let computedBuf: Buffer
+    let expectedBuf: Buffer
+    if (expectedHash.startsWith(SCRYPT_HASH_PREFIX)) {
+      computedBuf = Buffer.from(await scrypt(password, salt, 64, SCRYPT_PARAMS))
+      expectedBuf = Buffer.from(expectedHash.slice(SCRYPT_HASH_PREFIX.length), 'hex')
+    } else {
+      // Legacy Node-default hash (N=16384): still verifiable, upgraded on
+      // the next successful login.
+      computedBuf = Buffer.from(await scrypt(password, salt, 64))
+      expectedBuf = Buffer.from(expectedHash, 'hex')
+    }
     if (computedBuf.length !== expectedBuf.length) return false
     return timingSafeEqual(computedBuf, expectedBuf)
   } catch {
@@ -112,6 +137,18 @@ export async function authenticateUser(
 
   if (!(await verifyPassword(password, String(row.salt), String(row.password_hash)))) {
     return null
+  }
+
+  // Transparent cost-parameter migration: a legacy-default hash is re-hashed
+  // with the current parameters on the first successful login. Failure to
+  // persist it is not a login failure — the old hash stays valid.
+  if (needsPasswordRehash(String(row.password_hash))) {
+    try {
+      const upgraded = await hashPassword(password, String(row.salt))
+      db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(upgraded, Date.now(), row.id)
+    } catch {
+      // keep the legacy hash
+    }
   }
 
   return toSafeUser(row)

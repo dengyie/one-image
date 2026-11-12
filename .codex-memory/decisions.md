@@ -95,3 +95,10 @@
 - **判定**：LaMa ONNX（任意量化变体）在 pxed 4GB 宿主不可常驻服务——Linux ORT run 阶段激活峰值 ~499MB（FFC 全分辨率 fp32 频域分支）> 宿主极限 free 405MB（zoneinfo 实测，meminfo 是 lxcfs 虚构）。量化只救 create（fp32 230MB → qdq2 ~150MB）不救 run。
 - **决策**：部署诚实门——capabilities `smartErase.lamaAvailable` 反映真实 warm 态（create + 真实洞 tile run 全过才 true；探针零 mask 会跳过 session.run 的坑已修），未 warm 时 route 503 `smart_erase_warming`（在限流/计费之前）。宿主不足时档位对用户隐藏而非 500。**激活路径**：宿主升配后 warm 自然落位，零代码。
 - **质量定案**：INT8 QDQ 四变体洞内 PSNR 16-18dB（fp32 对照）但填充视觉干净——生成式填充的 PSNR 门失效；选 qdq2（59MB，突发最小）。最终质量裁定权在 owner 公网人眼验收（需先升配）。
+
+## 2026-11-13 全项目深度 review 定案（PR #51）
+
+- **安全基线**：provenance CBOR 扫描（匿名可达）必须预算化——任何对 caller-controlled 字节流的逐 offset 启发式扫描都要有候选数/字节双预算；上游 HTTP body 读取必须流式封顶（AbortSignal 只限时不限字节）。
+- **ORT 升版协议**：onnxruntime-node 跳大版本前必须过本地真实推理 e2e（session create + probe run + 洞外逐位 bit-exact）；本地裸跑 bundle 需 junction node_modules（release 形态天然满足）。
+- **receiver 同步协议**：Windows 工作树 scp 直传会带 CRLF 使宿主 bash 语法崩溃——必须先转 LF（已发生一次并即时修复）；repo 副本为权威。
+- **review 建议需验证**：两处 agent 建议被驳回（sharpen"原位卷积"改变滤波语义；掩膜"成功后清除"会清错文档）——修复前先读语义，报告不是真理。

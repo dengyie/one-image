@@ -97,6 +97,12 @@ jobs:
           # (~247MB unpacked -> 32MB). The LaMa model itself lives on the host
           # (ONEIMAGE_LAMA_MODEL_PATH) and never enters the archive.
           rm -rf release/node_modules/onnxruntime-node/bin/napi-v6/darwin                  release/node_modules/onnxruntime-node/bin/napi-v6/win32                  release/node_modules/onnxruntime-node/bin/napi-v6/linux/arm64
+          # Guard the prune: if a future ORT release moves its N-API layout,
+          # the rm paths would silently no-op and ship a ~247MB archive.
+          test -d release/node_modules/onnxruntime-node/bin/napi-v6/linux/x64
+          test ! -e release/node_modules/onnxruntime-node/bin/napi-v6/darwin
+          test ! -e release/node_modules/onnxruntime-node/bin/napi-v6/win32
+          test ! -e release/node_modules/onnxruntime-node/bin/napi-v6/linux/arm64
           tar -C release --dereference -czf "oneimage-${RELEASE_SHA}.tar.gz" .
           sha256sum "oneimage-${RELEASE_SHA}.tar.gz" > "oneimage-${RELEASE_SHA}.tar.gz.sha256"
       - name: Upload release artifacts

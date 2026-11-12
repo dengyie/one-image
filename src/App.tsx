@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { validateImageFile } from './application/file-policy'
 import { exportEditor, planRenderDimensions, PREVIEW_MAX_EDGE, renderEditor, resolveRenderDimensions, type DecodedSource } from './application/editor-renderer'
 import { createBrowserCanvasFactory, decodeEditorSource } from './infrastructure/editor-canvas'
@@ -46,13 +46,10 @@ import { BottomDock, type ActiveTool } from './components/editor/BottomDock'
 import { EmptyDropzone } from './components/editor/EmptyDropzone'
 import { PointerRipples } from './components/ui/PointerRipples'
 import { UserNavCapsule } from './components/navigation/UserNavCapsule'
-import { AuthModal } from './components/auth/AuthModal'
-import { ProfileModal } from './components/auth/ProfileModal'
-import { ImageGenModal, type ImageGenOutcome } from './components/imagegen/ImageGenModal'
-import { VideoGenModal } from './components/imagegen/VideoGenModal'
+import type { ImageGenOutcome } from './components/imagegen/ImageGenModal'
 import { REFERENCE_MAX_EDGE, prepareReferenceImage, type ReferenceSource } from './application/imagegen-input'
 import { captionImage, fetchImagegenCapabilities } from './infrastructure/imagegen-client'
-import { HistoryDrawer, type UnifiedHistoryItem } from './components/history/HistoryDrawer'
+import type { UnifiedHistoryItem } from './components/history/HistoryDrawer'
 import {
   fetchCurrentUser,
   logoutUser,
@@ -110,6 +107,24 @@ function describeImageGenOutcome(outcome: ImageGenOutcome, count: number): strin
     parts.push(`模型未按 ${outcome.requestedSize} 出图`)
   }
   return parts.join('，')
+}
+
+// Secondary flows are code-split: the five modals ship as separate chunks and
+// mount on first open (LazyMount keeps them mounted afterwards so their
+// internal state survives close/reopen exactly as the always-mounted build
+// did). The editor's first paint no longer pulls their weight.
+const ImageGenModal = lazy(() => import('./components/imagegen/ImageGenModal').then((m) => ({ default: m.ImageGenModal })))
+const VideoGenModal = lazy(() => import('./components/imagegen/VideoGenModal').then((m) => ({ default: m.VideoGenModal })))
+const AuthModal = lazy(() => import('./components/auth/AuthModal').then((m) => ({ default: m.AuthModal })))
+const ProfileModal = lazy(() => import('./components/auth/ProfileModal').then((m) => ({ default: m.ProfileModal })))
+const HistoryDrawer = lazy(() => import('./components/history/HistoryDrawer').then((m) => ({ default: m.HistoryDrawer })))
+
+function LazyMount({ open, children }: { open: boolean; children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(open)
+  useEffect(() => {
+    if (open) setMounted(true)
+  }, [open])
+  return mounted ? <Suspense fallback={null}>{children}</Suspense> : null
 }
 
 function generateThumbnailFromSource(source: DecodedSource, maxEdge = 320): string {
@@ -1741,18 +1756,23 @@ export function App() {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-zinc-950 select-none">
-      {/* WebGL Multi-Color Interactive Fluid Ripples Backdrop */}
-      <PointerRipples
-        className="fixed inset-0 pointer-events-none w-full h-full z-0"
-        opacity={0.58}
-        curl={13}
-        splatRadius={0.24}
-        densityDissipation={2.4}
-        velocityDissipation={1.6}
-        colorIntensity={0.26}
-        colorSaturation={0.72}
-        idleMs={4000}
-      />
+      {/* WebGL Multi-Color Interactive Fluid Ripples Backdrop: only the empty
+          state ever shows it — the editor canvas covers it otherwise — so it
+          is unmounted while editing instead of running its WebGL rAF loop
+          behind opaque pixels. */}
+      {!file && (
+        <PointerRipples
+          className="fixed inset-0 pointer-events-none w-full h-full z-0"
+          opacity={0.58}
+          curl={13}
+          splatRadius={0.24}
+          densityDissipation={2.4}
+          velocityDissipation={1.6}
+          colorIntensity={0.26}
+          colorSaturation={0.72}
+          idleMs={4000}
+        />
+      )}
 
       <input
         ref={fileInputRef}
@@ -1979,87 +1999,97 @@ export function App() {
       )}
 
       {/* Slide-over History Drawer */}
-      <HistoryDrawer
-        isOpen={showHistoryDrawer}
-        user={currentUser}
-        localItems={localHistoryItems}
-        cloudItems={cloudProjects}
-        storageBytes={totalStorageBytes}
-        onClose={() => setShowHistoryDrawer(false)}
-        onRestoreItem={(item) => void handleRestoreUnifiedItem(item)}
-        onExportItem={(item) => void handleExportUnifiedItem(item)}
-        onSyncToCloud={(item) => void handleSyncToCloud(item)}
-        onDeleteItem={(item) => void handleDeleteUnifiedItem(item)}
-        onClearAllLocal={() => void handleClearAllLocal()}
-        onOpenAuth={() => {
-          flushPendingPersist()
-          setShowHistoryDrawer(false)
-          setShowAuthModal(true)
-        }}
-      />
+      <LazyMount open={showHistoryDrawer}>
+        <HistoryDrawer
+          isOpen={showHistoryDrawer}
+          user={currentUser}
+          localItems={localHistoryItems}
+          cloudItems={cloudProjects}
+          storageBytes={totalStorageBytes}
+          onClose={() => setShowHistoryDrawer(false)}
+          onRestoreItem={(item) => void handleRestoreUnifiedItem(item)}
+          onExportItem={(item) => void handleExportUnifiedItem(item)}
+          onSyncToCloud={(item) => void handleSyncToCloud(item)}
+          onDeleteItem={(item) => void handleDeleteUnifiedItem(item)}
+          onClearAllLocal={() => void handleClearAllLocal()}
+          onOpenAuth={() => {
+            flushPendingPersist()
+            setShowHistoryDrawer(false)
+            setShowAuthModal(true)
+          }}
+        />
+      </LazyMount>
 
       {/* AI Image Generation Modal */}
-      <ImageGenModal
-        isOpen={showImageGenModal}
-        onClose={() => {
-          setShowImageGenModal(false)
-          setRegenSeed(null)
-        }}
-        currentImage={file}
-        getCurrentReference={getCurrentReference}
-        initialPrompt={regenSeed}
-        onGenerated={(files, outcome) => {
-          setShowImageGenModal(false)
-          // A 换源重绘 seed must not survive its own session: otherwise the
-          // next *plain* open would silently overwrite the user's prompt with
-          // the stale caption and clear their reference again.
-          setRegenSeed(null)
-          void (async () => {
-            // Each opened image pushes the previous one into the undo tree,
-            // so a multi-image batch stays fully walkable.
-            for (const file of files) {
-              await documentSwitcher.openDocument(file, (decoded) => ({
-                docId: createDraftId(),
-                file,
-                state: createEditorState(decoded.width, decoded.height),
-              }))
-            }
-            showToast(describeImageGenOutcome(outcome, files.length), outcome.failed > 0 ? 'info' : 'success')
-          })()
-        }}
-      />
+      <LazyMount open={showImageGenModal}>
+        <ImageGenModal
+          isOpen={showImageGenModal}
+          onClose={() => {
+            setShowImageGenModal(false)
+            setRegenSeed(null)
+          }}
+          currentImage={file}
+          getCurrentReference={getCurrentReference}
+          initialPrompt={regenSeed}
+          onGenerated={(files, outcome) => {
+            setShowImageGenModal(false)
+            // A 换源重绘 seed must not survive its own session: otherwise the
+            // next *plain* open would silently overwrite the user's prompt with
+            // the stale caption and clear their reference again.
+            setRegenSeed(null)
+            void (async () => {
+              // Each opened image pushes the previous one into the undo tree,
+              // so a multi-image batch stays fully walkable.
+              for (const file of files) {
+                await documentSwitcher.openDocument(file, (decoded) => ({
+                  docId: createDraftId(),
+                  file,
+                  state: createEditorState(decoded.width, decoded.height),
+                }))
+              }
+              showToast(describeImageGenOutcome(outcome, files.length), outcome.failed > 0 ? 'info' : 'success')
+            })()
+          }}
+        />
+      </LazyMount>
 
       {/* AI Video Generation Modal: results play in place, never in the workspace */}
-      <VideoGenModal isOpen={showVideoGenModal} onClose={() => setShowVideoGenModal(false)} />
+      <LazyMount open={showVideoGenModal}>
+        <VideoGenModal isOpen={showVideoGenModal} onClose={() => setShowVideoGenModal(false)} />
+      </LazyMount>
 
       {/* Auth Modal (Login / Register) */}
-      <AuthModal
-        isOpen={showAuthModal}
-        onClose={() => setShowAuthModal(false)}
-        onSuccess={(user) => {
-          // refreshHistory is owned by the effect watching currentUser; calling
-          // it here would run a stale closure and duplicate the refresh.
-          setCurrentUser(user)
-          showToast(`欢迎回来，${user.nickname || user.username}！`, 'success')
-        }}
-      />
+      <LazyMount open={showAuthModal}>
+        <AuthModal
+          isOpen={showAuthModal}
+          onClose={() => setShowAuthModal(false)}
+          onSuccess={(user) => {
+            // refreshHistory is owned by the effect watching currentUser; calling
+            // it here would run a stale closure and duplicate the refresh.
+            setCurrentUser(user)
+            showToast(`欢迎回来，${user.nickname || user.username}！`, 'success')
+          }}
+        />
+      </LazyMount>
 
       {/* Profile Modal */}
-      <ProfileModal
-        isOpen={showProfileModal}
-        user={currentUser}
-        localHistoryCount={localHistoryItems.length}
-        cloudProjectsCount={cloudProjects.length}
-        onClose={() => setShowProfileModal(false)}
-        onUserUpdated={(updated) => {
-          setCurrentUser(updated)
-          showToast('个人资料已保存', 'success')
-        }}
-        onLogout={() => {
-          void handleLogout()
-          setShowProfileModal(false)
-        }}
-      />
+      <LazyMount open={showProfileModal}>
+        <ProfileModal
+          isOpen={showProfileModal}
+          user={currentUser}
+          localHistoryCount={localHistoryItems.length}
+          cloudProjectsCount={cloudProjects.length}
+          onClose={() => setShowProfileModal(false)}
+          onUserUpdated={(updated) => {
+            setCurrentUser(updated)
+            showToast('个人资料已保存', 'success')
+          }}
+          onLogout={() => {
+            void handleLogout()
+            setShowProfileModal(false)
+          }}
+        />
+      </LazyMount>
 
       {/* Floating Toast Notification */}
       {toast && (
