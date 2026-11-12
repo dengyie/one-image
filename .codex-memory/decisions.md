@@ -107,3 +107,7 @@
 
 - **SSRF DNS 解析校验不修**：imagegen 媒体面对 mesh/回环地址的私有出口是 mediaOrigin 特性（回环媒体走 directDispatcher），DNS 级私网封锁会砍掉该特性；真正的边界（https 强制 + mediaOrigin 同源 + key 不出 baseUrl 域）已存在。若未来 mediaOrigin 特性下线再重议。
 - **XFF 首跳信任不修**：生产拓扑 nginx 仅绑 127.0.0.1 且覆写 XFF，cf-connecting-ip 优先已生效；改派生键会重置既有用户的限流/日额键，纯拓扑假设换来的回归风险不值。
+
+## 2026-11-13 useWorkingSet/BottomDock context 化有意不做
+
+- 纯代码搬运（无行为变化、无可新增断言），在已生产验证的 1900 行组件上搬 50+ 接线点的回归风险 > 可维护性收益。显式记 backlog 而非赶工。同理裁定收口：深度 review 全部 actionable 项至此处理完毕（P0/P1/P2 已修，P3 已修或论证）。

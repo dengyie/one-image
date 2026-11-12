@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react'
 import type { EditorState, Rect, AnnotationLayer } from '../../domain/editor-state'
 import { createEditorState, clampCrop, rotatedDimensions, isStrokePointRedundant } from '../../domain/editor-state'
-import { renderEditor, schedulePreview, planRenderDimensions, PREVIEW_MAX_EDGE, type DecodedSource } from '../../application/editor-renderer'
+import { renderEditor, schedulePreview, planRenderDimensions, PREVIEW_MAX_EDGE, type CanvasFactory, type DecodedSource, type RenderCanvas } from '../../application/editor-renderer'
 import { createBrowserCanvasFactory } from '../../infrastructure/editor-canvas'
 import { mapPointerToSource, mapSourceRectToViewport, createCropGesture, updateCropGesture, computeCursorAnchoredPan, clampZoom, isNearActualSize, type CropHandle, type CropGesture } from '../image-editor-model'
 import { resolveSwitchDirection, type SwitchDirection } from '../../application/document-switch'
@@ -168,8 +168,22 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const fxTokenRef = useRef(0)
   const switchHintRef = useRef(switchHint)
   switchHintRef.current = switchHint
+  const zoomScaleRef = useRef(zoomScale)
+  zoomScaleRef.current = zoomScale
+  const panOffsetRef = useRef(panOffset)
+  panOffsetRef.current = panOffset
 
   // Render canvas pipeline
+  // The preview renders straight into the master canvas (drawEditor paints
+  // the full opaque base first), and scratch canvases (mosaic/blur/watermark
+  // layers) come from a per-size pool whose handout index resets each frame —
+  // a frame's scratch canvases are unreferenced after the render callback
+  // returns, so frame N+1 reuses them instead of allocating ~17MB churn per
+  // frame.
+  const masterUsedRef = useRef(false)
+  const previewPoolRef = useRef<Map<string, RenderCanvas[]>>(new Map())
+  const poolIndexRef = useRef<Map<string, number>>(new Map())
+
   useEffect(() => {
     if (!source || !canvasRef.current) return
     const canvas = canvasRef.current
@@ -183,16 +197,48 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     const cancel = schedulePreview(async () => {
       try {
-        const rendered = renderEditor(viewSource, effectiveState, factory, {
+        // Reset the per-frame handout: this frame's base canvas is the
+        // master, later creates (layer scratch) come from the pool.
+        masterUsedRef.current = false
+        poolIndexRef.current.clear()
+        const previewFactory: CanvasFactory = {
+          create: (width: number, height: number) => {
+            if (!masterUsedRef.current) {
+              masterUsedRef.current = true
+              canvas.width = width
+              canvas.height = height
+              return canvas as unknown as RenderCanvas
+            }
+            const key = `${width}x${height}`
+            let pool = previewPoolRef.current.get(key)
+            if (!pool) {
+              pool = []
+              previewPoolRef.current.set(key, pool)
+            }
+            const index = poolIndexRef.current.get(key) ?? 0
+            poolIndexRef.current.set(key, index + 1)
+            if (index < pool.length) return pool[index]
+            const made = factory.create(width, height)
+            // Cap per-size scratch retention; beyond it, allocate transiently.
+            if (pool.length < 6) pool.push(made)
+            return made
+          },
+        }
+        const rendered = renderEditor(viewSource, effectiveState, previewFactory, {
           maxEdge: PREVIEW_MAX_EDGE,
           showFullSource: activeTool === 'crop',
         })
-        canvas.width = rendered.width
-        canvas.height = rendered.height
-        const ctx = canvas.getContext('2d')
-        if (ctx) {
-          ctx.clearRect(0, 0, rendered.width, rendered.height)
-          ctx.drawImage(rendered.canvas as CanvasImageSource, 0, 0)
+        // The base canvas WAS the master — no copy pass needed. Only the
+        // compare/full-source paths that bypassed the master handout (the
+        // master was used by something else this frame) still copy.
+        if (rendered.canvas !== (canvas as unknown as RenderCanvas)) {
+          canvas.width = rendered.width
+          canvas.height = rendered.height
+          const ctx = canvas.getContext('2d')
+          if (ctx) {
+            ctx.clearRect(0, 0, rendered.width, rendered.height)
+            ctx.drawImage(rendered.canvas as CanvasImageSource, 0, 0)
+          }
         }
       } catch (err) {
         if ((err as Error)?.name !== 'AbortError') {
@@ -299,37 +345,40 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   }, [])
 
-  // Mouse wheel zoom (cursor-centered)
-  const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
+  // Mouse wheel zoom (cursor-centered). Native listener with
+  // passive: false — React attaches wheel passively at the root, so an
+  // onWheel preventDefault is a no-op (and the console warns).
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const handler = (e: WheelEvent) => {
       e.preventDefault()
       e.stopPropagation()
-      if (!containerRef.current) return
-
-      const rect = containerRef.current.getBoundingClientRect()
+      const rect = container.getBoundingClientRect()
       const mouseX = e.clientX - rect.left
       const mouseY = e.clientY - rect.top
 
       const factor = e.deltaY < 0 ? 1.15 : 0.87
-      const newScale = clampZoom(zoomScale * factor)
+      const newScale = clampZoom(zoomScaleRef.current * factor)
 
       const { x: newPanX, y: newPanY } = computeCursorAnchoredPan(
         mouseX,
         mouseY,
         rect.width / 2,
         rect.height / 2,
-        panOffset,
-        zoomScale,
+        panOffsetRef.current,
+        zoomScaleRef.current,
         newScale
       )
 
       onZoomChange(newScale)
       onPanChange({ x: newPanX, y: newPanY })
-    },
-    [zoomScale, panOffset, onZoomChange, onPanChange]
-  )
+    }
+    container.addEventListener('wheel', handler, { passive: false })
+    return () => container.removeEventListener('wheel', handler)
+  }, [onZoomChange, onPanChange])
 
-  // Convert screen coordinates to canvas-local coordinates (0 to canvas.width, 0 to canvas.height)
+  // Convert screen coordinates to canvas-local coordinates// Convert screen coordinates to canvas-local coordinates (0 to canvas.width, 0 to canvas.height)
   const getCanvasLocalCoord = useCallback((clientX: number, clientY: number) => {
     if (!canvasRef.current) return { x: 0, y: 0 }
     const canvasRect = canvasRef.current.getBoundingClientRect()
@@ -833,7 +882,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   return (
     <div
       ref={containerRef}
-      onWheel={handleWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
