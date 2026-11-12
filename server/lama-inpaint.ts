@@ -480,6 +480,29 @@ export function onMiganWarmChange(
   poolFor({ ...options, kind: 'migan' }).onWarmChange(listener)
 }
 
+/**
+ * After the boot-time prewarm cycle gives up, keep trying gently forever:
+ * one single attempt per interval (never concurrent with the initial cycle —
+ * maintenance starts only after it finished). On a storm-prone host the warm
+ * lands whenever a calm window comes, lighting the tier up with zero user
+ * interaction. The timer is unref'd so shutdown never waits on it.
+ */
+export function maintainInpaintWarm(
+  options: { modelPath: string; entryPath?: string; kind?: 'lama' | 'migan' },
+  hooks: { log: (fields: Record<string, unknown>, msg: string) => void },
+  intervalMs = 15 * 60_000,
+): void {
+  const pool = poolFor(options)
+  const kind = options.kind ?? 'lama'
+  const tick = () => {
+    if (pool.isWarm()) return
+    void pool.prewarm(1, 0).then((warmed) => {
+      if (warmed) hooks.log({ modelPath: options.modelPath, kind }, 'inpaint tier warmed by maintenance prewarm')
+    })
+  }
+  setInterval(tick, intervalMs).unref()
+}
+
 // ---------------------------------------------------------------------------
 // Child side: resident ORT session answering IPC requests.
 // ---------------------------------------------------------------------------
