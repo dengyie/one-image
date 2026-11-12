@@ -10,8 +10,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: oneimage-production
-  cancel-in-progress: false
+  # Verify runs per-ref so a PR never queues behind a production deploy;
+  # package+deploy stay serialized through the production group.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
@@ -117,6 +119,12 @@ jobs:
   deploy-pxed:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: package
+    # The deploy itself must stay serialized even though the workflow-level
+    # group is now per-ref: two rapid main pushes would otherwise race the
+    # receiver's symlink flip and supervisor restart.
+    concurrency:
+      group: oneimage-production
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     environment:
       name: production

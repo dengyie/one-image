@@ -26,8 +26,11 @@ describe('history-storage failure paths', () => {
   it('degrades gracefully when IndexedDB is unavailable', async () => {
     vi.stubGlobal('indexedDB', undefined)
 
+    // Honest contract: without IndexedDB nothing was persisted, so the save
+    // reports null (the same signal as a quota failure) instead of a fake
+    // item the caller would trust.
     const saved = await saveLocalHistory(makeItem('unavailable'))
-    expect(saved?.id).toBe('unavailable')
+    expect(saved).toBeNull()
     expect(await listLocalHistory()).toEqual([])
     expect(await getLocalHistory('unavailable')).toBeNull()
 

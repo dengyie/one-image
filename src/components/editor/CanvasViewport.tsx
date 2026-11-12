@@ -28,6 +28,12 @@ interface CanvasViewportProps {
   /** Painted smart-erase mask diameter in source pixels. */
   eraseBrushSize: number
   /**
+   * Mirrored out: true while a pointer gesture (pan / crop drag / stroke) is
+   * in flight. Keyboard undo/redo in the parent reads this to avoid swapping
+   * the document underneath a live gesture.
+   */
+  gestureActiveRef?: { current: boolean }
+  /**
    * Whether a painted stroke may open an erase region. Off while the watermark
    * tool shows the "add watermark" tab, so that tab's gestures stay inert.
    */
@@ -86,6 +92,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   eraseMaskShape,
   eraseBrushSize,
   eraseDrawingEnabled = true,
+  gestureActiveRef,
   textStyle,
   textColor,
   textSize,
@@ -130,6 +137,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   // Active crop gesture
   const cropGestureRef = useRef<CropGesture | null>(null)
+  // Keep the parent's gesture mirror in sync at every lifecycle boundary.
+  const syncGestureActive = () => {
+    const ref = gestureActiveRef
+    if (ref) ref.current = Boolean(isPanningRef.current || cropGestureRef.current || currentStrokeRef.current)
+  }
 
   // Panning drag state
   const isPanningRef = useRef(false)
@@ -362,6 +374,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     // Middle button or Space held -> Pan
     if (e.button === 1 || isSpaceDownRef.current || activeTool === 'none') {
       isPanningRef.current = true
+      syncGestureActive()
       panStartRef.current = {
         x: e.clientX,
         y: e.clientY,
@@ -400,6 +413,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         canvasRect: { x: localPt.x, y: localPt.y, width: 0, height: 0 },
       }
       currentStrokeRef.current = stroke
+      syncGestureActive()
       setCurrentStroke(stroke)
     } else if (activeTool === 'mosaic') {
       const stroke: DrawingStroke = {
@@ -410,6 +424,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         canvasRect: { x: localPt.x, y: localPt.y, width: 0, height: 0 },
       }
       currentStrokeRef.current = stroke
+      syncGestureActive()
       setCurrentStroke(stroke)
     } else if (activeTool === 'watermark' && eraseDrawingEnabled && eraseMaskShape === 'brush') {
       const stroke: DrawingStroke = {
@@ -420,6 +435,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         canvasRect: { x: localPt.x, y: localPt.y, width: 0, height: 0 },
       }
       currentStrokeRef.current = stroke
+      syncGestureActive()
       setCurrentStroke(stroke)
     } else if (activeTool === 'watermark' && eraseDrawingEnabled && eraseMaskShape === 'rect') {
       // Drag-to-draw the erase box. Before this branch the gesture fell through
@@ -433,6 +449,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         canvasRect: { x: localPt.x, y: localPt.y, width: 0, height: 0 },
       }
       currentStrokeRef.current = stroke
+      syncGestureActive()
       setCurrentStroke(stroke)
     } else if (activeTool === 'text') {
       setActiveTextInput({
@@ -533,6 +550,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (isPanningRef.current) {
       isPanningRef.current = false
+      syncGestureActive()
       if (containerRef.current) {
         containerRef.current.style.cursor = isSpaceDownRef.current ? 'grab' : ''
       }
@@ -540,6 +558,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (cropGestureRef.current) {
       cropGestureRef.current = null
+      syncGestureActive()
       // Commit the session's own draft: the crop the user dragged to is queued
       // as a live edit, and reading a render-time `state` here can lag behind
       // the last pointer move (or predate the drag entirely).
@@ -550,6 +569,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const stroke = currentStrokeRef.current || currentStroke
     if (stroke) {
       currentStrokeRef.current = null
+      syncGestureActive()
       setCurrentStroke(null)
 
       let newLayer: AnnotationLayer | null = null
@@ -686,17 +706,20 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const handlePointerCancel = () => {
     if (isPanningRef.current) {
       isPanningRef.current = false
+      syncGestureActive()
       if (containerRef.current) {
         containerRef.current.style.cursor = isSpaceDownRef.current ? 'grab' : ''
       }
     }
     if (cropGestureRef.current) {
       cropGestureRef.current = null
+      syncGestureActive()
       onCancelDraft()
       return
     }
     if (currentStrokeRef.current) {
       currentStrokeRef.current = null
+      syncGestureActive()
       setCurrentStroke(null)
     }
     setActiveTextInput(null)
@@ -715,13 +738,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       // ignore
     }
     const sourcePt = getPointerSourceCoord(e.clientX, e.clientY)
+    syncGestureActive()
     cropGestureRef.current = createCropGesture(
       handle,
       sourcePt,
       state.crop,
       { x: 0, y: 0, width: source.width, height: source.height },
-      state.aspectRatio
+      state.aspectRatio,
     )
+    syncGestureActive()
   }
 
   // Double click toggles Fit / 100%
