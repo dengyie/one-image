@@ -553,13 +553,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         // Sub-pixel source moves cannot alter the rendered stroke; skipping
         // them avoids both state bloat and a re-render per pointer event.
         if (isStrokePointRedundant(lastPoint, sourcePt)) return
-        const nextPoints = [...currentStrokeRef.current.points, sourcePt]
-        const nextCanvasPoints = [...currentStrokeRef.current.canvasPoints, localPt]
-        const updated: DrawingStroke = {
-          ...currentStrokeRef.current,
-          points: nextPoints,
-          canvasPoints: nextCanvasPoints,
-        }
+        // Amortized O(1) append: the live stroke's arrays are mutated in the
+        // ref (the transient drawing buffer nobody else holds), and React
+        // gets a fresh wrapper object so the SVG overlay re-renders. Copying
+        // both arrays per pointer move was O(n²) across a long stroke.
+        const stroke = currentStrokeRef.current
+        stroke.points.push(sourcePt)
+        stroke.canvasPoints.push(localPt)
+        const updated: DrawingStroke = { ...stroke }
         currentStrokeRef.current = updated
         setCurrentStroke(updated)
       } else {
