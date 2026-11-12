@@ -72,6 +72,7 @@ import type { MosaicType, MosaicShape } from './components/editor/SubToolbars/Mo
 import type { WatermarkLayout, WatermarkEraseType, WatermarkTab } from './components/editor/SubToolbars/WatermarkSubToolbar'
 import { stripImageMetadata } from './application/image-metadata-stripper'
 import type { SmartEraseMode, FillProvider } from './infrastructure/inpaint/auto-route'
+import { useDraftPersistence } from './application/use-draft-persistence'
 import { runErasePipeline } from './application/smart-erase-run'
 import type { SmartEraseStage } from './infrastructure/inpaint/smart-erase'
 import { downloadBlob } from './infrastructure/download'
@@ -94,6 +95,16 @@ const viewportSize = () => ({ width: window.innerWidth, height: window.innerHeig
  * whether the model honoured the requested size, and any images that failed
  * after the upstream had already billed for them.
  */
+// Engine display names for the erase-completion toast and history labels.
+const ERASE_ENGINE_LABELS: Record<FillProvider, string> = {
+  blur: '高斯磨砂',
+  pixel: '像素打码',
+  solid: '实心遮蔽',
+  classical: '本地扩散',
+  migan: 'MI-GAN 合成',
+  lama: 'LaMa 服务端合成',
+}
+
 function describeImageGenOutcome(outcome: ImageGenOutcome, count: number): string {
   const first = outcome.images[0]
   const pixels = first?.width && first?.height ? `${first.width}×${first.height}` : '尺寸未知'
@@ -294,6 +305,8 @@ export function App() {
   // Toast feedback
   const [toast, setToast] = useState<{ text: string; type: 'info' | 'success' | 'error' } | null>(null)
   const toastTimerRef = useRef<number | null>(null)
+  // Mirror of the editor viewport's live pointer gesture (set by CanvasViewport).
+  const editorGestureRef = useRef(false)
 
   const showToast = useCallback((text: string, type: 'info' | 'success' | 'error' = 'info') => {
     setToast({ text, type })
@@ -302,6 +315,11 @@ export function App() {
       setToast(null)
       toastTimerRef.current = null
     }, 3000)
+  }, [])
+
+  // A pending hide timer must not outlive the component.
+  useEffect(() => () => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current)
   }, [])
 
   // Check current user session on load
@@ -447,109 +465,19 @@ export function App() {
     setPanOffset({ x: 0, y: 0 })
   }, [])
 
-  // Auto-persist the current draft (debounced) whenever the editor state
-  // changes. One effect owns persistence so commit/undo/redo/revert all flow
-  // through it without side effects inside state updaters.
-  const persistWarnedRef = useRef(false)
-  const pendingPersistRef = useRef<{ draftId: string; file: File; state: EditorState; source: DecodedSource } | null>(null)
+  // Draft autosave owns persistence (debounce, flush-on-hide, quota warning)
+  // via useDraftPersistence below.
+  const { flushPendingPersist } = useDraftPersistence({
+    file,
+    decodedSource,
+    currentState,
+    currentDraftIdRef,
+    showToast,
+    onSaved: useCallback(() => {
+      void listLocalHistory().then(setLocalHistoryItems)
+    }, []),
+  })
 
-  // A draft's source image never changes, so its thumbnail is rendered once per
-  // draft instead of on every debounced autosave.
-  const thumbnailCacheRef = useRef<Map<string, string>>(new Map())
-  const thumbnailFor = useCallback((draftId: string, source: DecodedSource) => {
-    const cached = thumbnailCacheRef.current.get(draftId)
-    if (cached) return cached
-    const thumbnail = generateThumbnailFromSource(source, 320)
-    const cache = thumbnailCacheRef.current
-    cache.set(draftId, thumbnail)
-    if (cache.size > 60) {
-      const oldest = cache.keys().next().value
-      if (oldest !== undefined) cache.delete(oldest)
-    }
-    return thumbnail
-  }, [])
-
-  const persistDraftNow = useCallback(
-    async (draftId: string, targetFile: File, state: EditorState, source: DecodedSource) => {
-      try {
-        // The storage layer owns the per-draft invariants: it preserves cloud
-        // linkage across upserts, reuses the stored thumbnail (the original
-        // image never changes for a draft id) and writes the original blob
-        // exactly once. This call only supplies fresh editor state.
-        const saved = await saveLocalHistory({
-          id: draftId,
-          title: targetFile.name.replace(/\.[^/.]+$/, ''),
-          fileName: targetFile.name,
-          fileSize: targetFile.size,
-          mimeType: targetFile.type || 'image/jpeg',
-          width: source.width,
-          height: source.height,
-          thumbnail: thumbnailFor(draftId, source),
-          originalBlob: targetFile,
-          editorState: state,
-          updatedAt: Date.now(),
-        })
-
-        if (saved === null) {
-          if (!persistWarnedRef.current) {
-            persistWarnedRef.current = true
-            showToast('本地草稿保存失败（浏览器存储空间不足），请及时导出保留成果', 'error')
-          }
-          return
-        }
-
-        const locals = await listLocalHistory()
-        setLocalHistoryItems(locals)
-      } catch (err) {
-        console.warn('Auto-save to IndexedDB skipped:', err)
-        if (!persistWarnedRef.current) {
-          persistWarnedRef.current = true
-          showToast('本地草稿保存失败，请及时导出保留成果', 'error')
-        }
-      }
-    },
-    [showToast, thumbnailFor]
-  )
-
-  useEffect(() => {
-    const draftId = currentDraftIdRef.current
-    if (!file || !decodedSource || !currentState || !draftId) return
-    pendingPersistRef.current = { draftId, file, state: currentState, source: decodedSource }
-    const timer = window.setTimeout(() => {
-      const pending = pendingPersistRef.current
-      if (!pending) return
-      pendingPersistRef.current = null
-      void persistDraftNow(pending.draftId, pending.file, pending.state, pending.source)
-    }, 800)
-    return () => window.clearTimeout(timer)
-  }, [file, decodedSource, currentState, persistDraftNow])
-
-  // Flush a pending debounced save before the page goes away, so a quick edit
-  // followed by a tab close still lands in IndexedDB.
-  const flushPendingPersist = useCallback(() => {
-    const pending = pendingPersistRef.current
-    if (!pending) return
-    pendingPersistRef.current = null
-    void persistDraftNow(pending.draftId, pending.file, pending.state, pending.source)
-  }, [persistDraftNow])
-
-  useEffect(() => {
-    const flush = () => {
-      const pending = pendingPersistRef.current
-      if (!pending) return
-      pendingPersistRef.current = null
-      void persistDraftNow(pending.draftId, pending.file, pending.state, pending.source)
-    }
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') flush()
-    }
-    window.addEventListener('pagehide', flush)
-    document.addEventListener('visibilitychange', onVisibilityChange)
-    return () => {
-      window.removeEventListener('pagehide', flush)
-      document.removeEventListener('visibilitychange', onVisibilityChange)
-    }
-  }, [persistDraftNow])
 
   // One switch choreography for every document change: a new image, a draft
   // restored from history, or undo/redo landing on another document. It decodes
@@ -1006,14 +934,6 @@ export function App() {
   // chosen by the erase mode in the browser-local worker under the pending mask
   // regions, and open the result as a new document. Pixels outside the mask are
   // preserved bit-for-bit by the compositor; everything here stays on-device.
-  const ERASE_ENGINE_LABELS: Record<FillProvider, string> = {
-    blur: '高斯磨砂',
-    pixel: '像素打码',
-    solid: '实心遮蔽',
-    classical: '本地扩散',
-    migan: 'MI-GAN 合成',
-    lama: 'LaMa 服务端合成',
-  }
 
   // modeOverride lets the one-click cleanup pin the routing to the safe local
   // path regardless of which engine the toolbar happens to have selected.
@@ -1496,7 +1416,10 @@ export function App() {
         return
       }
 
-      // Undo / Redo
+      // Undo / Redo. Skipped while a pointer gesture is in flight: swapping
+      // the document underneath a live crop drag or stroke would stream the
+      // gesture's remaining events into the wrong document.
+      if (editorGestureRef.current) return
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.code === 'KeyZ') {
         e.preventDefault()
         handleUndo()
@@ -1678,6 +1601,7 @@ export function App() {
           {/* Master Spatial Canvas Viewport */}
           <main className="w-full h-full">
             <CanvasViewport
+              gestureActiveRef={editorGestureRef}
               source={decodedSource}
               docKey={activeRootId}
               switchHint={switchHint}

@@ -100,3 +100,4 @@ Select and contract-test the first AI image generation provider with explicit co
 - **本机点亮验证（11-12）**：生产同款 bundle 本机 200/2.9s、洞外 bit-exact True、capabilities 动态翻转实测——P0 修复经真实 IPC 验证，「升配即点亮」为实测事实（详见 vault §16.50 追记）。
 - **深度 review 加固（11-13，PR #51）**：线上 `f79667a6`。CBOR 扫描预算（匿名 DoS）、上游响应字节封顶、优雅关闭 disposeLamaPools、估算预览化、sharpen scratch、掩膜失败恢复、worker 看门狗、fastify/ORT 安全升级（ORT 1.31 原生跳跃经本地真实推理 bit-exact 背书）、CI audit 门、receiver 探针补 smartErase。Backlog 见 vault §16.51。
 - **review 第二批（11-13，PR #52）**：线上 `8afc2a04`。token 时序比较、scrypt N=2^16（maxmem 必须显式，32MB 默认拒绝 2^16）+s2$ 自描述格式+登录重哈希、ECONNRESET 双扣费收窄、email-code/auth-password 直测（457 tests）、5 modal lazy + PointerRipples 门控（主 chunk 404.9KB）、CI 归档断言。
+- **review 第三批（11-13，PR #53）**：线上 `4b3b2911`，466 tests。history 字节预算+原子合并、擦除管线抽取（App.tsx 1927 行）、downloadBlob/isProvenanceDetected 去重、onemail/cloud-quota 补测。Backlog 仅剩：App.tsx 后续 hook 抽取、BottomDock context 化（纯重构）；SSRF/XFF 有意不修（decisions.md）。

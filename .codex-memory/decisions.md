@@ -102,3 +102,8 @@
 - **ORT 升版协议**：onnxruntime-node 跳大版本前必须过本地真实推理 e2e（session create + probe run + 洞外逐位 bit-exact）；本地裸跑 bundle 需 junction node_modules（release 形态天然满足）。
 - **receiver 同步协议**：Windows 工作树 scp 直传会带 CRLF 使宿主 bash 语法崩溃——必须先转 LF（已发生一次并即时修复）；repo 副本为权威。
 - **review 建议需验证**：两处 agent 建议被驳回（sharpen"原位卷积"改变滤波语义；掩膜"成功后清除"会清错文档）——修复前先读语义，报告不是真理。
+
+## 2026-11-13 SSRF/XFF 有意不修（review 第三批定案）
+
+- **SSRF DNS 解析校验不修**：imagegen 媒体面对 mesh/回环地址的私有出口是 mediaOrigin 特性（回环媒体走 directDispatcher），DNS 级私网封锁会砍掉该特性；真正的边界（https 强制 + mediaOrigin 同源 + key 不出 baseUrl 域）已存在。若未来 mediaOrigin 特性下线再重议。
+- **XFF 首跳信任不修**：生产拓扑 nginx 仅绑 127.0.0.1 且覆写 XFF，cf-connecting-ip 优先已生效；改派生键会重置既有用户的限流/日额键，纯拓扑假设换来的回归风险不值。

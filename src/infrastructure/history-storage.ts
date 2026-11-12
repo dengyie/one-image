@@ -158,7 +158,10 @@ export async function saveLocalHistory(
   const updatedAt = item.updatedAt || Date.now()
 
   if (!isIndexedDBSupported()) {
-    return { ...item, updatedAt }
+    // No IndexedDB (private mode, old browser): nothing was persisted, so
+    // returning a fake "saved" item would lie to the caller. null keeps the
+    // quota-failure contract — callers warn instead of trusting history.
+    return null
   }
 
   try {
