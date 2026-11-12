@@ -107,3 +107,4 @@ Select and contract-test the first AI image generation provider with explicit co
 - **MI-GAN int8（11-13，§16.57）**：服务档模型 int8 化（45MB/902ms/品质合理），migan 会话 arena 关闭（Linux BFC 高水位钉死 80MB）+ 256 probe（风暴存活阈值 55MB）。pxed env 已切 int8；当前风暴相位未 warm——诚实门兜底浏览器回退，平静窗口自动点亮。
 - **维护循环（11-13，PR #60/#61）**：boot 3 次快试 → 15 分钟单次维护（maintainInpaintWarm，unref 计时器）——平静窗口 ≤15min 自动点亮。流程教训：PR amend 前先确认未被合并；cherry-pick 冲突中断会留下空分支。
 - **vendor 拆分（11-13，PR #62）**：app 块 187KB（gzip 56KB）+ vendor 缓存稳定——回访部署 -55% 传输。inpaint warm 丢失观测日志上线。迭代收口。
+- **review 第六批（11-13，PR #63）**：笔画 O(1) 追加（长笔画 O(n²) 消失）+ usage-ledger 直测 4 用例（474 tests）。Backlog actionable 清零。

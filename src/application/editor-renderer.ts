@@ -486,6 +486,10 @@ function applySharpen(context: CanvasRenderingContext2D | OffscreenCanvasRenderi
 
 const sharpenScratch = new Map<string, Uint8ClampedArray>()
 
+// Tile-watermark stamps keyed by their visual parameters (bounded — a
+// session touches a handful of configs).
+const tileStampCache = new Map<string, RenderCanvas>()
+
 function cssFilter(adjustments: Adjustments): string {
   return `brightness(${Math.max(0, 1 + adjustments.brightness / 100)}) contrast(${Math.max(0, 1 + adjustments.contrast / 100)}) saturate(${Math.max(0, 1 + adjustments.saturation / 100)}) blur(${Math.max(0, adjustments.blur)}px)`
 }
@@ -686,15 +690,46 @@ function drawAnnotations(
 
         if (isTile) {
           const textMetrics = context.measureText ? context.measureText(text) : { width: fontSize * text.length * 0.6 }
-          const stepX = Math.max(140, textMetrics.width + 80 * scale)
-          const stepY = Math.max(90, fontSize * 4.5)
+          const stepX = Math.max(140, Math.round(textMetrics.width + 80 * scale))
+          const stepY = Math.max(90, Math.round(fontSize * 4.5))
+          const font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`
+          const color = layer.color || '#ffffff'
 
           context.translate?.(outputWidth / 2, outputHeight / 2)
           context.rotate?.((-30 * Math.PI) / 180)
           const diag = Math.sqrt(outputWidth * outputWidth + outputHeight * outputHeight)
-          for (let y = -diag / 2; y <= diag / 2; y += stepY) {
-            for (let x = -diag / 2; x <= diag / 2; x += stepX) {
-              context.fillText?.(text, x, y)
+
+          // The grid is hundreds of fillText calls per frame; stamp the text
+          // once per (text, size, color) into a stepX x stepY cell and paint
+          // the rotated area with a pattern instead. Visual phase shifts by
+          // textH within one step — a decorative overlay, imperceptible.
+          const stampKey = `${text}|${fontSize}|${color}|${stepX}x${stepY}`
+          let stamp = tileStampCache.get(stampKey)
+          if (!stamp) {
+            const made = factory.create(stepX, stepY)
+            const sctx = made.getContext('2d')
+            if (sctx) {
+              sctx.font = font
+              sctx.fillStyle = color
+              sctx.textBaseline = 'bottom'
+              sctx.fillText?.(text, 0, Math.round(fontSize * 1.2))
+              tileStampCache.set(stampKey, made)
+              stamp = made
+              if (tileStampCache.size > 8) {
+                const oldest = tileStampCache.keys().next().value
+                if (oldest !== undefined) tileStampCache.delete(oldest)
+              }
+            }
+          }
+          const pattern = stamp && context.createPattern ? context.createPattern(stamp as unknown as CanvasImageSource, 'repeat') : null
+          if (pattern) {
+            context.fillStyle = pattern
+            context.fillRect?.(-diag / 2, -diag / 2, diag, diag)
+          } else {
+            for (let y = -diag / 2; y <= diag / 2; y += stepY) {
+              for (let x = -diag / 2; x <= diag / 2; x += stepX) {
+                context.fillText?.(text, x, y)
+              }
             }
           }
         } else {
