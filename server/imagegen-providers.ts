@@ -236,13 +236,15 @@ async function readJsonCapped(response: Response): Promise<unknown> {
 // upstream, so the request was neither processed nor billed there — one
 // immediate retry is safe (no double generation, no double spend) and covers
 // the repeatedly observed "transient, passes on retry" pattern. Real upstream
-// errors arrive as HTTP responses and are never retried, and an exhausted
-// request budget still surfaces as the original timeout.
+// errors arrive as HTTP responses and are never retried. ECONNRESET and
+// "Other side closed" are deliberately NOT retried: they can fire mid-response
+// after the upstream has already generated and billed, and re-issuing would
+// double-spend the user.
 function isConnectPhaseFailure(err: unknown): boolean {
   if (!(err instanceof TypeError)) return false
   const cause = (err as { cause?: unknown }).cause
   const text = `${err.message} ${cause instanceof Error ? `${cause.name}: ${cause.message}` : ''}`
-  return /ConnectTimeoutError|socket disconnected before secure TLS|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|Other side closed|connect timeout/i.test(text)
+  return /ConnectTimeoutError|socket disconnected before secure TLS|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|connect timeout/i.test(text)
 }
 
 async function upstreamFetch(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Response> {
