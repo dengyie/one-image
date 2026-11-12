@@ -115,3 +115,14 @@
 ## 2026-11-13 squash 合并后核对 main 树（流程定案）
 
 PR squash 的 SHA 不保证包含分支上"看似已推"的提交——rebase 重放时的行尾/补丁差可让提交被误判跳过。**每个 PR 合并后必须 `git diff <上一_release_sha> <new_main_sha>` 核对实际差异**，再触发/确认部署。本次发现 #64 的 squash 缺失图章代码，直推纠正（a234665，CI 绿）。
+
+## 2026-11-13 模型资产归档 MangoDrive（owner 指令）
+
+- **约定**：OneImage 模型资产（量化产物等派生文件）一律上传 MangoDrive（Google 聚合盘）`/GooglePool-Secure/Apps/uploader/OneImage/models/`，本地 Temp 不留存易失副本；仓库 public/models 仅保留本地开发所需的下载目标。pxed 本地文件仍是运行时路径（Drive 为归档/分发层，不为运行时引入网络依赖）。
+- **通道**：app-uploader-rw 账号（REST PUT /api/fs/put，Mozilla UA 全链路）；上传后 fs/list 核对 + 直链下载全字节 SHA-256 比对（实测 f1b2bdfd… 一致）。
+- **已归档**：lama_int8qdq2.onnx（59.7MB）/ migan_pipeline_v2_int8.onnx（10.4MB）/ migan_pipeline_v2.onnx（26.8MB）——路径 `/OneImage/models/`。lama fp32 不归档（源头 HuggingFace Carve/LaMa-ONNX 可随时取回）。
+
+## 2026-11-13 模型归档边界定案（>100MB 与 mesh 不可达）
+
+- **CF 免费版 body 限制 100MB**：lama_fp32.onnx（198MB）与 fp32_ext.onnx.data（203MB）无法过公网 API 归档；pxed 的 EasyTier mesh 无 OpenList 节点（10.144.144.3 不可达）。**定案**：两件保留 pxed（升级路径零成本资产，HF 亦有 fp32 源头），不强推 Drive。ext 对（4.2MB+已拆出的 data 形态非同文件）与 mixed 已归档。
+- **运行时三件套**（qdq2 59MB + migan int8 10MB + migan fp32 26.8MB）= 97MB，为 pxed 唯一需保留的运行时模型。
