@@ -63,3 +63,12 @@
 - [x] Upgrade CI actions to Node 24 runtime.
 - [x] Drain rejected multipart streams and propagate client disconnect cancellation to the OpenAI request.
 - [x] Align the Nginx template with the trusted forwarded-client-IP rate-limit model.
+
+## 2026-11-12 LaMa 服务端化收尾
+
+- [x] PR #49 服务端 LaMa 档（审查 P0 result 处理器/prewarm 挂死/png 炸弹加固/pool 测试）部署。
+- [x] PR #50 真实 warm 探针（零 mask 跳过 session.run 的坑）+ capabilities 真实 warm 态 + 503 warming 门，部署。
+- [x] pxed 宿主终局实测：run 激活峰值 ~499MB > 宿主极限 405MB → 档位自动隐藏（诚实门生效，公网验收过）。
+- [ ] **Manual-required**：LaMa 点亮需宿主升配（ECI 4→8GB）或迁宿主——owner 裁定；零代码，warm 落位即亮。
+- [ ] **Manual-required**：点亮后 owner 公网人眼验收填充质量（INT8 填充 vs MI-GAN 的质量裁定，§16.50）。
+- [ ] 可选迭代：MI-GAN 服务端化（26MB 模型 pxed 稳活，可靠但质量退回 owner 原裁定前水平）。

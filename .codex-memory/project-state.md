@@ -90,3 +90,11 @@ Select and contract-test the first AI image generation provider with explicit co
 - Server: `/personal/pxed/oneimage`, Supervisor program `oneimage`
 - Gateway package: `providers/content-provenance-gateway/` at v3 baseline `f6b4a23`
 - Canonical docs: `01.项目/OneImage/OneImage 文档索引.md`, `01.项目/OneImage/OneImage 开发文档.md`
+
+## 2026-11-12 LaMa 服务端化部署 + 宿主终局判定
+
+- 线上 main `8087b5bc`（PR #49 服务端 LaMa 智能修复 + PR #50 真实 warm 探针/诚实门）。生产 `.env`：`ONEIMAGE_LAMA_MODEL_PATH=/var/lib/oneimage/lama_int8qdq2.onnx`（59MB INT8 量化，sha256 校验过）。
+- **宿主终局（实测）**：Linux ORT 上该模型 run 阶段激活峰值 ~499MB（FFC fp32 频域分支结构性），pxed 4GB 宿主极限 free 405MB（停 19 服务后）——端到端不可达。capabilities 反映真实 warm 态：warm 不落 → 档位自动隐藏 + route 503 `smart_erase_warming`。**ECI 升配 4→8GB 或迁宿主后零代码自动点亮**。
+- `/proc/meminfo` 在 ECI 宿主被 lxcfs 虚拟化（Slab=0 假象），真实水位只看 `/proc/zoneinfo`。
+- 影子实例已撤；19 个曾停服务已全部恢复（49 RUNNING）。详见 vault §16.50。
+- **本机点亮验证（11-12）**：生产同款 bundle 本机 200/2.9s、洞外 bit-exact True、capabilities 动态翻转实测——P0 修复经真实 IPC 验证，「升配即点亮」为实测事实（详见 vault §16.50 追记）。

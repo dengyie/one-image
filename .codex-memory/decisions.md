@@ -89,3 +89,9 @@
 - Rollback trigger: If a CPU-plane path is added that must reject large images up front, reintroduce a pixel cap together with the enforcement, not as a declaration alone.
 - Related files: `src/domain/tool.ts`, `src/domain/tool-registry.ts`, `src/infrastructure/browser-image-processor.ts`, `src/infrastructure/image-worker.ts`, `tests/tool-registry.test.ts`.
 
+
+## 2026-11-12 LaMa 宿主不可行判定 + 诚实可用性门（PR #49/#50）
+
+- **判定**：LaMa ONNX（任意量化变体）在 pxed 4GB 宿主不可常驻服务——Linux ORT run 阶段激活峰值 ~499MB（FFC 全分辨率 fp32 频域分支）> 宿主极限 free 405MB（zoneinfo 实测，meminfo 是 lxcfs 虚构）。量化只救 create（fp32 230MB → qdq2 ~150MB）不救 run。
+- **决策**：部署诚实门——capabilities `smartErase.lamaAvailable` 反映真实 warm 态（create + 真实洞 tile run 全过才 true；探针零 mask 会跳过 session.run 的坑已修），未 warm 时 route 503 `smart_erase_warming`（在限流/计费之前）。宿主不足时档位对用户隐藏而非 500。**激活路径**：宿主升配后 warm 自然落位，零代码。
+- **质量定案**：INT8 QDQ 四变体洞内 PSNR 16-18dB（fp32 对照）但填充视觉干净——生成式填充的 PSNR 门失效；选 qdq2（59MB，突发最小）。最终质量裁定权在 owner 公网人眼验收（需先升配）。

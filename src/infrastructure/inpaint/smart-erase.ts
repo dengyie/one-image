@@ -76,14 +76,30 @@ export function runSmartErase(
 
   return new Promise<ImageData>((resolve, reject) => {
     const active = options.workerFactory ? options.workerFactory() : getWorker()
+    // Hang watchdog: while the run is in flight, undo/redo/switch are gated
+    // off, so an unsettled promise locks the whole editor. Progress messages
+    // keep resetting it — only a truly silent worker trips it.
+    const WATCHDOG_MS = 120_000
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    const armWatchdog = () => {
+      if (options.workerFactory) return
+      if (watchdog !== undefined) clearTimeout(watchdog)
+      watchdog = setTimeout(() => {
+        cleanup()
+        disposeSmartEraseWorker()
+        reject(new Error('智能修复长时间无响应，已重置引擎，请重试'))
+      }, WATCHDOG_MS)
+    }
     const onMessage = (event: MessageEvent<SmartEraseResponse & { runId?: string }>) => {
       const message = event.data
       if (message.runId !== runId) return
       if (message.type === 'progress') {
+        armWatchdog()
         onStage({ phase: 'model', loadedBytes: message.loadedBytes, totalBytes: message.totalBytes })
         return
       }
       if (message.type === 'stage') {
+        armWatchdog()
         onStage(
           message.stage === 'inference'
             ? { phase: 'inference', provider: message.provider }
@@ -107,12 +123,17 @@ export function runSmartErase(
     }
 
     const cleanup = () => {
+      if (watchdog !== undefined) {
+        clearTimeout(watchdog)
+        watchdog = undefined
+      }
       active.removeEventListener('message', onMessage as unknown as EventListener)
       active.removeEventListener('error', onError as unknown as EventListener)
     }
 
     active.addEventListener('message', onMessage as unknown as EventListener)
     active.addEventListener('error', onError as unknown as EventListener)
+    armWatchdog()
     active.postMessage(
       {
         type: 'run',

@@ -152,8 +152,43 @@ function isPrivateV6(host: string): boolean {
   return false
 }
 
+// The AbortSignal caps upstream time, not bytes: a hostile or broken upstream
+// streaming gigabytes inside one timeout window would otherwise OOM the
+// process through arrayBuffer()/json()/text(). Every upstream body read goes
+// through these caps.
+const MAX_UPSTREAM_JSON_BYTES = 64 * 1024 * 1024
+const MAX_UPSTREAM_ERROR_BYTES = 64 * 1024
+
+// Streams the body under a hard byte cap; returns an empty buffer when the
+// cap trips (callers decide whether that is an error or a truncated error
+// message).
+async function readBodyCapped(response: Response, capBytes: number): Promise<Buffer> {
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > capBytes) {
+    void response.body?.cancel().catch(() => {})
+    return Buffer.alloc(0)
+  }
+  const body = response.body
+  if (!body) return Buffer.alloc(0)
+  const chunks: Buffer[] = []
+  let total = 0
+  try {
+    for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+      total += (chunk as Uint8Array).byteLength
+      if (total > capBytes) {
+        await body.cancel().catch(() => {})
+        return Buffer.alloc(0)
+      }
+      chunks.push(Buffer.from(chunk as Uint8Array))
+    }
+  } catch {
+    // Partial read (abort/reset): surface what arrived.
+  }
+  return Buffer.concat(chunks)
+}
+
 async function readUpstreamError(response: Response): Promise<string> {
-  const text = await response.text().catch(() => '')
+  const text = (await readBodyCapped(response, MAX_UPSTREAM_ERROR_BYTES)).toString('utf8')
   try {
     const parsed = JSON.parse(text) as { error?: { message?: string } | string; message?: string }
     if (typeof parsed.error === 'string') return truncate(parsed.error, 300)
@@ -172,6 +207,27 @@ function clientStatusFor(upstreamStatus: number): number {
   // Only 429 propagates so clients can back off.
   if (upstreamStatus === 429) return 429
   return 502
+}
+
+// Media downloads throw on cap trips; the message names the surface's limit.
+async function readMediaWithCap(response: Response, capBytes: number, message: string): Promise<Buffer> {
+  const bytes = await readBodyCapped(response, capBytes)
+  if (bytes.byteLength === 0 || bytes.byteLength > capBytes) {
+    throw new ImagegenUpstreamError(message, 0, 502)
+  }
+  return bytes
+}
+
+// Chat-dialect replies carry inline base64 media, so the cap is the video
+// ceiling; a tripped cap parses as null and surfaces as "nothing usable".
+async function readJsonCapped(response: Response): Promise<unknown> {
+  const text = (await readBodyCapped(response, MAX_UPSTREAM_JSON_BYTES)).toString('utf8')
+  if (text.length === 0) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
 // The operator's outbound path to the gateway (a proxy tunnel on the deploy
@@ -221,11 +277,8 @@ async function fetchImageBytes(url: URL, provider: ImagegenProviderConfig, signa
   if (!response.ok) {
     throw new ImagegenUpstreamError(`下载生成结果失败：HTTP ${response.status}`, response.status, 502)
   }
-  const buffer = await response.arrayBuffer()
-  if (buffer.byteLength > MAX_IMAGE_BYTES) {
-    throw new ImagegenUpstreamError('生成结果超过 32MB 上限', 0, 502)
-  }
-  return withImageMeta(Buffer.from(buffer).toString('base64'), mimeOf(response.headers.get('content-type')))
+  const buffer = await readMediaWithCap(response, MAX_IMAGE_BYTES, '生成结果超过 32MB 上限')
+  return withImageMeta(buffer.toString('base64'), mimeOf(response.headers.get('content-type')))
 }
 
 function mimeOf(contentType: string | null | undefined): string {
@@ -252,15 +305,7 @@ async function fetchVideoBytes(url: URL, provider: ImagegenProviderConfig, signa
   if (declaredType.startsWith('image/')) {
     throw new ImagegenUpstreamError('上游返回的不是视频而是图片', 0, 502)
   }
-  // A declared size that already exceeds the cap never needs downloading.
-  const declaredLength = Number(response.headers.get('content-length'))
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_VIDEO_BYTES) {
-    throw new ImagegenUpstreamError('生成视频超过 64MB 上限', 0, 502)
-  }
-  const buffer = Buffer.from(await response.arrayBuffer())
-  if (buffer.byteLength > MAX_VIDEO_BYTES) {
-    throw new ImagegenUpstreamError('生成视频超过 64MB 上限', 0, 502)
-  }
+  const buffer = await readMediaWithCap(response, MAX_VIDEO_BYTES, '生成视频超过 64MB 上限')
   return { mimeType: sniffVideoMime(buffer, response.headers.get('content-type')), bytes: buffer }
 }
 
@@ -399,7 +444,7 @@ interface OpenAIImagesResponse {
 }
 
 async function readOpenAIImagesPayload(response: Response): Promise<OpenAIImagesResponse | null> {
-  return (await response.json().catch(() => null)) as OpenAIImagesResponse | null
+  return (await readJsonCapped(response)) as OpenAIImagesResponse | null
 }
 
 function extensionOf(mimeType: string): string {
@@ -576,7 +621,7 @@ async function generateGemini(
     if (!response.ok) {
       throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
     }
-    const payload = (await response.json().catch(() => null)) as GeminiResponse | null
+    const payload = (await readJsonCapped(response)) as GeminiResponse | null
     const out = payload?.candidates?.[0]?.content?.parts ?? []
     let found = false
     const produced: GeneratedImage[] = []
@@ -736,7 +781,7 @@ async function generateOpenAIChatImage(
     if (!response.ok) {
       throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
     }
-    const payload = (await response.json().catch(() => null)) as
+    const payload = (await readJsonCapped(response)) as
       | { choices?: { message?: ChatMessage }[]; error?: { message?: string } }
       | null
     const message = payload?.choices?.[0]?.message
@@ -816,7 +861,7 @@ export async function generateVideo(
   if (!response.ok) {
     throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
   }
-  const payload = (await response.json().catch(() => null)) as
+  const payload = (await readJsonCapped(response)) as
     | { choices?: { message?: ChatMessage }[]; error?: { message?: string } }
     | null
   const message = payload?.choices?.[0]?.message
@@ -886,7 +931,7 @@ async function captionViaChat(
   if (!response.ok) {
     throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
   }
-  const payload = (await response.json().catch(() => null)) as
+  const payload = (await readJsonCapped(response)) as
     | { choices?: { message?: ChatMessage }[]; error?: { message?: string } }
     | null
   const message = payload?.choices?.[0]?.message
@@ -951,7 +996,7 @@ async function captionViaGemini(
   if (!response.ok) {
     throw new ImagegenUpstreamError(await readUpstreamError(response), response.status, clientStatusFor(response.status))
   }
-  const payload = (await response.json().catch(() => null)) as GeminiResponse | null
+  const payload = (await readJsonCapped(response)) as GeminiResponse | null
   const parts = payload?.candidates?.[0]?.content?.parts ?? []
   const text = parts
     .map((part) => (typeof part.text === 'string' ? part.text : ''))

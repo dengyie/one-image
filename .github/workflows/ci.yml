@@ -47,6 +47,9 @@ jobs:
       - name: Audit provenance gateway runtime dependencies
         run: npm --prefix providers/content-provenance-gateway audit --omit=dev --audit-level=high
 
+      - name: Audit main package runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
+
   package:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: verify
