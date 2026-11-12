@@ -168,12 +168,16 @@ async function main(): Promise<void> {
   // at boot-time idle beats loading it under request pressure on a host that
   // has already OOM-killed exactly that load once. Failures retry with
   // backoff and never affect the server's availability.
-  if (lamaModelPath) {
+  // Prewarm policy: the operator names which tiers warm at boot. Two pools
+  // prewarming concurrently on a memory-starved host interfere — each pool's
+  // doomed retries push the host over and collateral-kill the other's child.
+  const prewarmPolicy = (process.env.ONEIMAGE_INPAINT_PREWARM ?? 'both').split(',').map((v) => v.trim())
+  if (lamaModelPath && (prewarmPolicy.includes('both') || prewarmPolicy.includes('lama'))) {
     void prewarmLama({ modelPath: lamaModelPath }).then((warmed) => {
       app.log.info({ warmed }, 'lama prewarm finished')
     })
   }
-  if (miganModelPath) {
+  if (miganModelPath && (prewarmPolicy.includes('both') || prewarmPolicy.includes('migan'))) {
     void prewarmMigan({ modelPath: miganModelPath }).then((warmed) => {
       app.log.info({ warmed }, 'migan prewarm finished')
     })

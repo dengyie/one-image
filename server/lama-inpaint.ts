@@ -279,7 +279,13 @@ export class LamaProcessPool {
         // is the only way to distinguish OOM windows from config drift.
         process.stderr.write(`[inpaint-pool] warm attempt ${attempt}/${attempts} failed: ${err instanceof Error ? err.message : String(err)}
 `)
-        if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, backoffMs * attempt))
+        if (attempt < attempts) {
+          // After three fast failures the window is structurally too tight —
+          // escalate the spacing so a doomed retry loop stops re-bombing the
+          // host (and collateral-killing sibling pools' children) every 30s.
+          const spacing = attempt <= 3 ? backoffMs * attempt : backoffMs * attempt * 20
+          await new Promise((resolve) => setTimeout(resolve, spacing))
+        }
       }
     }
     return false
