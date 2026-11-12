@@ -14,10 +14,8 @@
 (host/infra side, outside the repo-only change scope)
 
 - [x] Raise nginx `client_max_body_size` to `26m` and sync the repository template.
-- [ ] Investigate the Cloudflare-tunnel upload throughput to pxed (~60-90 KB/s); uploads above a few
-      hundred KB currently `502`. App and nginx are fast locally, so the tunnel/host egress is the limit.
-- [ ] Restore app log capture on pxed (Supervisor `stdout_logfile` is configured but `fd 1` is a pipe
-      and `out.log` stopped growing); without it the origin has no request log.
+- [x] Tunnel throughput re-measured 2026-11-13: ~2MB/s sustained, 5MB uploads fine (no 502; nginx 26m fixed the tail). The old 60-90KB/s reading was latency-dominated on small payloads.
+- [x] App log capture: out.log active again (verified 2026-11-13, 830KB live request log).
 - [x] Sync the receiver's atomic entrypoint symlink logic and protect active releases during cleanup.
 - [ ] Rotate the dedicated OpenAI test key before any formal production release.
 

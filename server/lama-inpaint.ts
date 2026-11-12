@@ -509,7 +509,13 @@ export async function runLamaWorkerLoop(getModelPath: () => string | null): Prom
     if (session && sessionPath === modelPath) return session
     if (sessionLoading) return sessionLoading
     process.stderr.write(`[lama-child] creating session from ${modelPath}...`)
-    sessionLoading = ort.InferenceSession.create(modelPath).then((created) => {
+    // The migan tier runs on hosts where the resident footprint decides
+    // survival: ORT's BFC arena retains its high-water mark forever, so a
+    // single run would pin the peak (~80MB) as permanent resident. With the
+    // arena off, activations go through malloc and are returned after each
+    // run — the child shrinks back between requests.
+    const sessionOptions = childKind === 'migan' ? { enableCpuMemArena: false } : undefined
+    sessionLoading = ort.InferenceSession.create(modelPath, sessionOptions).then((created) => {
       process.stderr.write('[lama-child] session created')
       session = created
       sessionPath = modelPath
