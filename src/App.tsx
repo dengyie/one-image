@@ -49,6 +49,7 @@ import { UserNavCapsule } from './components/navigation/UserNavCapsule'
 import type { ImageGenOutcome } from './components/imagegen/ImageGenModal'
 import { REFERENCE_MAX_EDGE, prepareReferenceImage, type ReferenceSource } from './application/imagegen-input'
 import { captionImage, fetchImagegenCapabilities } from './infrastructure/imagegen-client'
+import { isProvenanceDetected } from './infrastructure/provenance-client'
 import type { UnifiedHistoryItem } from './components/history/HistoryDrawer'
 import {
   fetchCurrentUser,
@@ -69,14 +70,11 @@ import {
 import type { MarkupMode } from './components/editor/SubToolbars/MarkupSubToolbar'
 import type { MosaicType, MosaicShape } from './components/editor/SubToolbars/MosaicSubToolbar'
 import type { WatermarkLayout, WatermarkEraseType, WatermarkTab } from './components/editor/SubToolbars/WatermarkSubToolbar'
-import { runSmartErase, SMART_ERASE_MAX_EDGE, type SmartEraseStage } from './infrastructure/inpaint/smart-erase'
-import { drawEraseAiMask } from './application/editor-renderer'
-import { refineMaskToStrokes } from './infrastructure/inpaint/mask-refine'
 import { stripImageMetadata } from './application/image-metadata-stripper'
-import { countHolePixels } from './infrastructure/inpaint/classical-fill'
-import { routeFill, resolveEraseProvider, type SmartEraseMode, type FillProvider } from './infrastructure/inpaint/auto-route'
-import { compositeRgba } from './infrastructure/inpaint/inpaint-core'
-import { computeLamaCropRect, encodeLamaCrop, postServerLama, blobToBase64 } from './infrastructure/inpaint/lama-client'
+import type { SmartEraseMode, FillProvider } from './infrastructure/inpaint/auto-route'
+import { runErasePipeline } from './application/smart-erase-run'
+import type { SmartEraseStage } from './infrastructure/inpaint/smart-erase'
+import { downloadBlob } from './infrastructure/download'
 import { computeFitScale, clampZoom, isNearActualSize, isViewportOffFit, resolveCompareSource, MAX_FIT_SCALE } from './components/image-editor-model'
 import './styles.css'
 
@@ -760,14 +758,7 @@ export function App() {
     setIsProcessing(true)
     try {
       const { blob, filename } = await exportImage(outputMime, quality)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      downloadBlob(blob, filename)
 
       showToast(`已导出并下载：${filename}`, 'success')
     } catch (err) {
@@ -787,14 +778,7 @@ export function App() {
       setIsProcessing(true)
       try {
         const { blob, filename } = await exportImage(mime, quality)
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = filename
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        setTimeout(() => URL.revokeObjectURL(url), 1000)
+        downloadBlob(blob, filename)
         showToast(`已保存为 ${mime.split('/')[1].toUpperCase()}：${filename}`, 'success')
       } catch (err) {
         console.error('Export failed:', err)
@@ -876,10 +860,7 @@ export function App() {
       const { blob } = await exportImage('image/jpeg', 92)
       const input = createProvenanceInput(blob, file.name)
       const result = await checkProvenance(input)
-      const detected =
-        result.evidence.some((e) => e.outcome === 'detected') ||
-        result.localSignals.some((s) => s.kind === 'C2PA') ||
-        (result.selfDeclared?.length ?? 0) > 0
+      const detected = isProvenanceDetected(result)
       setProvenanceResult({ detected, note: describeProvenanceResult(result, { reencoded: true }) })
       setProvenanceResultDetail(result)
       showToast(detected ? '检出 AI 来源信号' : '未检出 AI 信号', detected ? 'info' : 'success')
@@ -1056,181 +1037,27 @@ export function App() {
     setSmartEraseError(null)
     setSmartEraseStage(null)
     try {
-      // exportEditor strips the marquee layers itself; the mask is drawn from
-      // the unstripped state through the same transform pipeline.
-      const snapshot = await exportEditor(decodedSource, state, factory, 'image/png', 1)
-      const bitmap = await createImageBitmap(snapshot)
-      const { width, height } = bitmap
-      // The AI pipeline pads to 512-aligned tiles internally; an unbounded
-      // source (a 25MB PNG can be 10000px wide) would blow the WASM linear
-      // memory. The guard applies to every filler so the limit stays one rule.
-      if (Math.max(width, height) > SMART_ERASE_MAX_EDGE) {
-        bitmap.close()
-        throw new Error(`图片最大边 ${Math.max(width, height)}px 超过消除上限 ${SMART_ERASE_MAX_EDGE}px，请先裁剪或缩放`)
-      }
-
-      const makeCanvas = () => factory.create(width, height)
-      const ctxOf = (canvas: ReturnType<typeof factory.create>) =>
-        canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
-
-      const imageCanvas = makeCanvas()
-      ctxOf(imageCanvas).drawImage(bitmap, 0, 0)
-      bitmap.close()
-      const imageData = ctxOf(imageCanvas).getImageData(0, 0, width, height)
-
-      // Model mask: crisp white-on-black regions.
-      const maskCanvas = makeCanvas()
-      const maskCtx = ctxOf(maskCanvas)
-      maskCtx.fillStyle = '#000000'
-      maskCtx.fillRect(0, 0, width, height)
-      drawEraseAiMask(maskCtx, state, width, height, 1)
-      const maskData = maskCtx.getImageData(0, 0, width, height)
-
-      // Tighten whatever the user drew down to the overlay strokes it actually
-      // covers. A box around a watermark otherwise hands the filler a large
-      // rectangle of clean background to scramble — the exact reason the result
-      // looked "changed". Solid blackout is the guaranteed-cover option and
-      // keeps the region exactly as drawn; a filler that detects no stroke at
-      // all falls back to the drawn mask, so this can only ever shrink.
-      if (eraseType !== 'blackout') {
-        const refined = refineMaskToStrokes(
-          { data: imageData.data, width, height },
-          { data: maskData.data, width, height }
-        )
-        maskData.data.set(refined)
-      }
-      const maskGrid = { data: maskData.data, width, height }
-      if (countHolePixels(maskGrid) === 0) {
+      const outcome = await runErasePipeline({
+        decodedSource,
+        file,
+        state,
+        factory,
+        eraseType,
+        eraseMode,
+        modeOverride,
+        serverLamaAvailable,
+        onStage: setSmartEraseStage,
+      })
+      if (!outcome.ok) {
         showToast('选区为空：请先涂抹或框选水印', 'info')
         return
       }
-
-      // Route the hole to a filler: the AI mode picks between local diffusion
-      // and Gaussian frost by hole size (MI-GAN only when explicitly picked);
-      // the other modes are their own filler.
-      // A stale 高质量 selection (server lost its model between renders) must
-      // not fall into a guaranteed-502 path — degrade to auto routing.
-      const effectiveMode: SmartEraseMode =
-        modeOverride ?? (eraseMode === 'lama' && !serverLamaAvailable ? 'auto' : eraseMode)
-      const provider: FillProvider =
-        eraseType === 'ai'
-          ? routeFill({ mode: effectiveMode, mask: maskGrid, imageWidth: width, imageHeight: height }).provider
-          : resolveEraseProvider(eraseType)
-
-      // Composite alpha: the working mask blurred twice so the interior stays
-      // fully covered while edges feather into untouched pixels. It is built
-      // from the same mask the filler sees, so the blend window can never be
-      // wider than the hole.
-      const refineCanvas = makeCanvas()
-      ctxOf(refineCanvas).putImageData(maskData, 0, 0)
-      const alphaCanvas = makeCanvas()
-      const alphaCtx = ctxOf(alphaCanvas)
-      alphaCtx.fillStyle = '#000000'
-      alphaCtx.fillRect(0, 0, width, height)
-      alphaCtx.filter = 'blur(3px)'
-      alphaCtx.drawImage(refineCanvas as unknown as CanvasImageSource, 0, 0)
-      alphaCtx.drawImage(refineCanvas as unknown as CanvasImageSource, 0, 0)
-      const alphaData = alphaCtx.getImageData(0, 0, width, height)
-
-      let result: ImageData
-      if (provider === 'lama') {
-        // Server tier: crop to the mask neighborhood, upload the pair, blend
-        // the returned fill through the same feathered composite. The canvases
-        // are still alive here (the classical retry below relies on that too).
-        setSmartEraseStage({ phase: 'upload' })
-        const rect = computeLamaCropRect(maskGrid)
-        if (!rect) {
-          showToast('选区为空：请先涂抹或框选水印', 'info')
-          return
-        }
-        const createBlob = (canvas: unknown): Promise<Blob> => {
-          const anyCanvas = canvas as {
-            convertToBlob?: (options?: { type: string }) => Promise<Blob>
-            toBlob?: (callback: (blob: Blob | null) => void, type?: string) => void
-          }
-          return anyCanvas.convertToBlob
-            ? anyCanvas.convertToBlob({ type: 'image/png' })
-            : new Promise<Blob>((resolve, reject) =>
-                anyCanvas.toBlob?.((b) => (b ? resolve(b) : reject(new Error('裁剪编码失败'))), 'image/png'),
-              )
-        }
-        const imageBlob = await encodeLamaCrop(imageCanvas as unknown as CanvasImageSource, rect, factory, createBlob)
-        const maskBlob = await encodeLamaCrop(refineCanvas as unknown as CanvasImageSource, rect, factory, createBlob)
-        setSmartEraseStage({ phase: 'inference', provider: 'lama' })
-        const response = await postServerLama(
-          { imageBase64: await blobToBase64(imageBlob), maskBase64: await blobToBase64(maskBlob) },
-          { timeoutMs: 110_000 },
-        )
-        if (!response.ok || !response.data) {
-          throw new Error(response.message ?? '服务端修复失败')
-        }
-        const filledBlob = await (async () => {
-          const bytes = Uint8Array.from(atob(response.data!.image.base64), (ch) => ch.charCodeAt(0))
-          return new Blob([bytes], { type: 'image/png' })
-        })()
-        const filledBitmap = await createImageBitmap(filledBlob)
-        const filledCanvas = makeCanvas()
-        const filledCtx = ctxOf(filledCanvas)
-        filledCtx.imageSmoothingEnabled = rect.scale < 1
-        // The server answers at the encoded resolution; draw it back at the
-        // crop's original size so the composite stays in full-frame space.
-        filledCtx.drawImage(filledBitmap, rect.x, rect.y, rect.width, rect.height)
-        filledBitmap.close()
-        const filled = ctxOf(filledCanvas).getImageData(0, 0, width, height)
-        result = new ImageData(width, height)
-        result.data.set(
-          compositeRgba(
-            { data: imageData.data, width, height },
-            { data: filled.data, width, height },
-            { data: alphaData.data, width, height },
-          ),
-        )
-      } else {
-        try {
-          result = await runSmartErase(
-            { image: imageData, mask: maskData, composite: alphaData, provider },
-            setSmartEraseStage
-          )
-        } catch (err) {
-        // The classical filler refuses pathologically large working sets; fall
-        // back to the model rather than failing the whole edit. The failed run
-        // transferred the caller's buffers away (they are detached now), so the
-        // retry re-reads the very planes it received from the canvases that
-        // produced them: imageCanvas holds the snapshot, refineCanvas the
-        // tightened mask, alphaCanvas the feathered alpha.
-          if (provider !== 'classical') throw err
-          result = await runSmartErase(
-            {
-              image: ctxOf(imageCanvas).getImageData(0, 0, width, height),
-              mask: ctxOf(refineCanvas).getImageData(0, 0, width, height),
-              composite: ctxOf(alphaCanvas).getImageData(0, 0, width, height),
-              provider: 'migan',
-            },
-            setSmartEraseStage
-          )
-        }
-      }
-
-      const outCanvas = makeCanvas()
-      ctxOf(outCanvas).putImageData(result, 0, 0)
-      const outCanvasAny = outCanvas as unknown as {
-        convertToBlob?: (options?: { type: string }) => Promise<Blob>
-        toBlob?: (callback: (blob: Blob | null) => void, type?: string) => void
-      }
-      const blob = outCanvasAny.convertToBlob
-        ? await outCanvasAny.convertToBlob({ type: 'image/png' })
-        : await new Promise<Blob>((resolve, reject) =>
-            outCanvasAny.toBlob?.((b) => (b ? resolve(b) : reject(new Error('修复结果导出失败'))), 'image/png')
-          )
-
-      const baseName = file.name.replace(/\.[^/.]+$/, '')
-      const resultFile = new File([blob], `${baseName}_erased.png`, { type: 'image/png' })
+      const { resultFile, provider, regions, clearedMask } = outcome
       // The pending marquees have served their purpose. Clear them from the
       // source document BEFORE switching, so undoing back to it does not
       // resurrect a stale "pending" frame over an already-erased region. If
-      // the switch fails the source document is still current, so the catch
+      // the switch fails the source document is still current, so the finally
       // restores exactly what was removed.
-      const clearedMask = (state.annotations ?? []).filter((layer) => layer.type === 'erase-ai')
       commitEdit((prev) => ({
         ...prev,
         annotations: (prev.annotations ?? []).filter((layer) => layer.type !== 'erase-ai'),
@@ -1254,7 +1081,7 @@ export function App() {
         }
       }
       if (opened) {
-        showToast(`消除完成（${ERASE_ENGINE_LABELS[provider]}）：${aiLayers.length} 个区域，掩膜外像素未改动`, 'success')
+        showToast(`消除完成（${ERASE_ENGINE_LABELS[provider]}）：${regions} 个区域，掩膜外像素未改动`, 'success')
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -1338,10 +1165,7 @@ export function App() {
         const input = createProvenanceInput(blob, filename)
         const result = await checkProvenance(input)
         setProvenanceResultDetail(result)
-        const detected =
-          result.evidence.some((e) => e.outcome === 'detected') ||
-          result.localSignals.some((s) => s.kind === 'C2PA') ||
-          (result.selfDeclared?.length ?? 0) > 0
+        const detected = isProvenanceDetected(result)
         setProvenanceResult({ detected, note: describeProvenanceResult(result, { reencoded: target !== 'original' }) })
         showToast(
           detected ? '检出 AI / C2PA 隐形水印信号' : '未检出嵌入式 AI / C2PA 信号',
@@ -1496,14 +1320,7 @@ export function App() {
       try {
         decoded = await decodeEditorSource(item.localItem.originalBlob)
         const blob = await exportEditor(decoded, item.localItem.editorState, factory, 'image/webp', 0.85)
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `${item.title}_exported.webp`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        setTimeout(() => URL.revokeObjectURL(url), 1000)
+        downloadBlob(blob, `${item.title}_exported.webp`)
         showToast(`已快速导出：${item.title}`, 'success')
       } catch (err) {
         console.error('Fast export failed:', err)

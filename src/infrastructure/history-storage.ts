@@ -29,6 +29,11 @@ const STORE_NAME = 'projects'
 const BLOB_STORE_NAME = 'blobs'
 const DB_VERSION = 2
 const MAX_LOCAL_ITEMS = 30
+// Count alone is not a storage budget: 30 drafts × a 25MB original ≈ 750MB,
+// which can eat the whole quota and silently stop autosaving. Originals are
+// stored once per draft id, so summing fileSize across ids approximates the
+// real footprint (thumbnails are data URLs, orders of magnitude smaller).
+export const MAX_LOCAL_BYTES = 256 * 1024 * 1024
 
 function isIndexedDBSupported(): boolean {
   return typeof indexedDB !== 'undefined'
@@ -158,43 +163,50 @@ export async function saveLocalHistory(
 
   try {
     const db = await openHistoryDB()
-    const existing = await new Promise<StoredProject | null>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readonly')
-      const request = tx.objectStore(STORE_NAME).get(item.id)
-      request.onsuccess = () => resolve((request.result as StoredProject) || null)
-      request.onerror = () => reject(request.error)
-    })
-
-    const merged: StoredProject = {
-      ...dropOriginalBlob(item as LocalHistoryItem),
-      thumbnail: existing?.thumbnail ?? item.thumbnail,
-      updatedAt,
-    }
-    if (item.isCloudSynced !== undefined) merged.isCloudSynced = item.isCloudSynced
-    else if (existing?.isCloudSynced !== undefined) merged.isCloudSynced = existing.isCloudSynced
-    if (item.cloudId !== undefined) merged.cloudId = item.cloudId
-    else if (existing?.cloudId !== undefined) merged.cloudId = existing.cloudId
-
-    await new Promise<void>((resolve, reject) => {
+    // Read-merge-write in ONE transaction: two tabs autosaving the same draft
+    // would otherwise interleave the readonly get and the readwrite put and
+    // lose cloud linkage merges.
+    const merged = await new Promise<StoredProject>((resolve, reject) => {
       const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readwrite')
+      const projects = tx.objectStore(STORE_NAME)
       const blobs = tx.objectStore(BLOB_STORE_NAME)
-      const hasBlobRequest = blobs.getKey(item.id)
-      hasBlobRequest.onsuccess = () => {
+      let record: StoredProject | null = null
+      const existingReq = projects.get(item.id)
+      existingReq.onsuccess = () => {
+        const existing = (existingReq.result as StoredProject | undefined) ?? null
+        record = {
+          ...dropOriginalBlob(item as LocalHistoryItem),
+          thumbnail: existing?.thumbnail ?? item.thumbnail,
+          updatedAt,
+        }
+        if (item.isCloudSynced !== undefined) record!.isCloudSynced = item.isCloudSynced
+        else if (existing?.isCloudSynced !== undefined) record!.isCloudSynced = existing.isCloudSynced
+        if (item.cloudId !== undefined) record!.cloudId = item.cloudId
+        else if (existing?.cloudId !== undefined) record!.cloudId = existing.cloudId
         // Blob-once: the original image for a draft id never changes, so only
         // the first save pays the bytes; later saves reuse the stored handle.
-        if (hasBlobRequest.result === undefined && item.originalBlob instanceof Blob) {
-          blobs.put(item.originalBlob, item.id)
+        const hasBlobReq = blobs.getKey(item.id)
+        hasBlobReq.onsuccess = () => {
+          if (hasBlobReq.result === undefined && item.originalBlob instanceof Blob) {
+            blobs.put(item.originalBlob, item.id)
+          }
+          projects.put(record!)
         }
-        tx.objectStore(STORE_NAME).put(merged)
+        hasBlobReq.onerror = () => reject(hasBlobReq.error)
       }
-      hasBlobRequest.onerror = () => reject(hasBlobRequest.error)
-      tx.oncomplete = () => resolve()
+      existingReq.onerror = () => reject(existingReq.error)
+      tx.oncomplete = () => resolve(record!)
       tx.onerror = () => reject(tx.error)
       tx.onabort = () => reject(tx.error)
     })
 
-    // Prune oldest items if count exceeds limit
-    await pruneOldestItems(db, MAX_LOCAL_ITEMS)
+    // Prune oldest items when over the count or byte budget. A prune failure
+    // must not fail the save (the record is already durable) — surface it.
+    try {
+      await pruneOldestItems(db, MAX_LOCAL_ITEMS, MAX_LOCAL_BYTES, item.id)
+    } catch (pruneErr) {
+      console.warn('Local history prune failed:', pruneErr)
+    }
 
     return { ...merged, originalBlob: item.originalBlob }
   } catch (err) {
@@ -203,38 +215,40 @@ export async function saveLocalHistory(
   }
 }
 
-async function pruneOldestItems(db: IDBDatabase, maxItems: number): Promise<void> {
-  // Resolves on transaction completion (not cursor exhaustion) so a caller
-  // refreshing its list right after saving never observes pruned items.
-  await new Promise<void>((resolve) => {
+async function pruneOldestItems(db: IDBDatabase, maxItems: number, byteBudget: number, keepId?: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
     const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readwrite')
     const projects = tx.objectStore(STORE_NAME)
     const blobs = tx.objectStore(BLOB_STORE_NAME)
-    const countReq = projects.count()
 
-    countReq.onsuccess = () => {
-      const count = countReq.result
-      if (count <= maxItems) return
-
-      const excess = count - maxItems
-      const index = projects.index('by_updatedAt')
-      const cursorReq = index.openCursor(null, 'next') // oldest first
-      let deleted = 0
-
-      cursorReq.onsuccess = () => {
-        const cursor = cursorReq.result
-        if (cursor && deleted < excess) {
-          blobs.delete(cursor.value.id)
-          cursor.delete()
-          deleted++
-          cursor.continue()
-        }
+    const index = projects.index('by_updatedAt')
+    const allReq = index.getAll()
+    allReq.onsuccess = () => {
+      // Oldest-first (the index key is updatedAt). Evict until both the count
+      // and byte budgets hold, never dropping the draft just saved or the
+      // last remaining item.
+      const records = (allReq.result as StoredProject[]).slice().sort((a, b) => a.updatedAt - b.updatedAt)
+      const totalBytes = records.reduce((sum, r) => sum + (Number(r.fileSize) || 0), 0)
+      let bytes = totalBytes
+      const victims = new Set<string>()
+      for (const record of records) {
+        const remaining = records.length - victims.size
+        const overCount = remaining > maxItems
+        const overBytes = bytes > byteBudget && remaining > 1
+        if (!overCount && !overBytes) break
+        if (record.id === keepId) continue
+        victims.add(record.id)
+        bytes -= Number(record.fileSize) || 0
+      }
+      for (const id of victims) {
+        blobs.delete(id)
+        projects.delete(id)
       }
     }
-
+    allReq.onerror = () => reject(allReq.error)
     tx.oncomplete = () => resolve()
-    tx.onerror = () => resolve()
-    tx.onabort = () => resolve()
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error)
   })
 }
 
