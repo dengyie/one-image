@@ -548,15 +548,21 @@ export async function runLamaWorkerLoop(getModelPath: () => string | null): Prom
             // (holes-only tiling) and the probe would prove nothing. The
             // output is discarded; only "one tile went through end to end"
             // matters.
-            const probeMask = new Uint8Array(TILE * TILE * 4)
+            // The probe's own transient activation peak decides whether the
+            // child survives warm on the storm-prone host: a 512 probe costs
+            // ~80MB transient, a 256 probe ~20MB (the migan model is
+            // dynamic-shaped). Real requests at bigger dims that still OOM
+            // are covered by the frontend's browser-worker fallback.
+            const probeSize = childKind === 'migan' ? 256 : TILE
+            const probeMask = new Uint8Array(probeSize * probeSize * 4)
             probeMask[0] = 255
             probeMask[1] = 255
             probeMask[2] = 255
             probeMask[3] = 255
             const probePlanes = {
-              width: TILE,
-              height: TILE,
-              image: new Uint8Array(TILE * TILE * 4).fill(128),
+              width: probeSize,
+              height: probeSize,
+              image: new Uint8Array(probeSize * probeSize * 4).fill(128),
               mask: probeMask,
             }
             const probe = childKind === 'migan'
