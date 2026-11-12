@@ -19,6 +19,7 @@ import { registerVideogenRoutes } from './videogen-route'
 import { registerSmartEraseRoutes, resolveLamaModelPath } from './smart-erase-route'
 import {
   CHILD_ENV_FLAG,
+  disposeLamaPools,
   isLamaWarm,
   onLamaWarmChange,
   prewarmLama,
@@ -139,6 +140,9 @@ async function main(): Promise<void> {
     try {
       await app.close()
       appDb.close()
+      // The forked LaMa workers hold the event loop open through their IPC
+      // channels; without this the graceful path hangs until SIGKILL.
+      disposeLamaPools()
     } catch (error) {
       app.log.error({ err: error }, 'OneImage server shutdown failed')
       process.exitCode = 1

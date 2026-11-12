@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { validateImageFile } from './application/file-policy'
-import { exportEditor, PREVIEW_MAX_EDGE, renderEditor, resolveRenderDimensions, type DecodedSource } from './application/editor-renderer'
+import { exportEditor, planRenderDimensions, PREVIEW_MAX_EDGE, renderEditor, resolveRenderDimensions, type DecodedSource } from './application/editor-renderer'
 import { createBrowserCanvasFactory, decodeEditorSource } from './infrastructure/editor-canvas'
 import type { OpenImageItem } from './components/editor/ImageListPanel'
 import { MAX_OPEN_IMAGES, findRootIdForSession } from './domain/working-set'
@@ -810,19 +810,39 @@ export function App() {
     }
   }, [exportImage, showToast])
 
-  // Live estimated size (debounced)
+  // Live estimated size (debounced). A settled state change must not run a
+  // full-resolution render+encode (up to a 25MP canvas + encode on the main
+  // thread) — encode the 2400px preview and scale by pixel count instead; the
+  // panel presents this as an estimate.
   useEffect(() => {
     if (!decodedSource || !currentState || !file) {
       setEstimatedBytes(null)
       return
     }
+    // Pristine state exporting to the original format is the original file's
+    // exact bytes (see exportImage) — skip rendering entirely.
+    const pristine = editorStatesEqual(createEditorState(decodedSource.width, decodedSource.height), currentState)
+    if (pristine && outputMime === file.type && !stripMetadata) {
+      setEstimatedBytes(file.size)
+      return
+    }
     let cancelled = false
     const timer = window.setTimeout(async () => {
       try {
-        const { blob } = await exportImage(outputMime, quality)
-        // The image or settings may have changed while this estimate was
-        // rendering; a stale size would label the wrong result.
-        if (!cancelled) setEstimatedBytes(blob.size)
+        const rendered = renderEditor(decodedSource, currentState, factory, PREVIEW_MAX_EDGE)
+        const canvas = rendered.canvas as {
+          convertToBlob?: (options?: { type: string; quality?: number }) => Promise<Blob>
+          toBlob?: (callback: (blob: Blob | null) => void, type?: string, quality?: number) => void
+        }
+        const blob = canvas.convertToBlob
+          ? await canvas.convertToBlob({ type: outputMime, quality: quality / 100 })
+          : await new Promise<Blob>((resolve, reject) =>
+              canvas.toBlob?.((b) => (b ? resolve(b) : reject(new Error('估算编码失败'))), outputMime, quality / 100),
+            )
+        const full = planRenderDimensions(currentState, Number.POSITIVE_INFINITY, false)
+        const previewPixels = rendered.width * rendered.height
+        const bytes = previewPixels > 0 ? Math.round(blob.size * (full.width * full.height / previewPixels)) : blob.size
+        if (!cancelled) setEstimatedBytes(Math.max(1, bytes))
       } catch (err) {
         if (!cancelled) console.warn('Size estimation skipped:', err)
       }
@@ -831,7 +851,7 @@ export function App() {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [decodedSource, currentState, file, outputMime, quality, exportImage])
+  }, [decodedSource, currentState, file, outputMime, quality, factory, stripMetadata])
 
   // Provenance AI Signal Check
   const handleCheckProvenance = useCallback(async () => {
@@ -1192,16 +1212,32 @@ export function App() {
       const resultFile = new File([blob], `${baseName}_erased.png`, { type: 'image/png' })
       // The pending marquees have served their purpose. Clear them from the
       // source document BEFORE switching, so undoing back to it does not
-      // resurrect a stale "pending" frame over an already-erased region.
+      // resurrect a stale "pending" frame over an already-erased region. If
+      // the switch fails the source document is still current, so the catch
+      // restores exactly what was removed.
+      const clearedMask = (state.annotations ?? []).filter((layer) => layer.type === 'erase-ai')
       commitEdit((prev) => ({
         ...prev,
         annotations: (prev.annotations ?? []).filter((layer) => layer.type !== 'erase-ai'),
       }))
-      const opened = await documentSwitcher.openDocument(resultFile, (decoded) => ({
-        docId: createDraftId(),
-        file: resultFile,
-        state: createEditorState(decoded.width, decoded.height),
-      }))
+      let opened = false
+      try {
+        opened = await documentSwitcher.openDocument(resultFile, (decoded) => ({
+          docId: createDraftId(),
+          file: resultFile,
+          state: createEditorState(decoded.width, decoded.height),
+        }))
+      } finally {
+        if (!opened) {
+          commitEdit((prev) => ({
+            ...prev,
+            annotations: [
+              ...(prev.annotations ?? []).filter((layer) => !clearedMask.some((cleared) => cleared.id === layer.id)),
+              ...clearedMask,
+            ],
+          }))
+        }
+      }
       if (opened) {
         showToast(`消除完成（${ERASE_ENGINE_LABELS[provider]}）：${aiLayers.length} 个区域，掩膜外像素未改动`, 'success')
       }
@@ -1213,7 +1249,7 @@ export function App() {
       setIsSmartErasing(false)
       setSmartEraseStage(null)
     }
-  }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode, isOneClickCleaning, isPreparingRegen])
+  }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode, serverLamaAvailable, isOneClickCleaning, isPreparingRegen])
 
   // Lossless metadata cleanup, shared by the standalone strip button and the
   // one-click watermark entry. Pristine files get pure container surgery

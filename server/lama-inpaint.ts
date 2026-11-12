@@ -418,6 +418,16 @@ export function onLamaWarmChange(
   poolFor(options).onWarmChange(listener)
 }
 
+/**
+ * Kills every resident child and drops the pool map: called on shutdown so
+ * the forked workers' IPC channels stop keeping the event loop alive (the
+ * graceful path otherwise hangs until the orchestrator's SIGKILL).
+ */
+export function disposeLamaPools(): void {
+  for (const pool of pools.values()) pool.dispose()
+  pools.clear()
+}
+
 function poolFor(options: { modelPath: string; entryPath?: string }): LamaProcessPool {
   let target = pools.get(options.modelPath)
   if (!target) {

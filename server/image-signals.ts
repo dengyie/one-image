@@ -96,9 +96,23 @@ function containsAscii(payload: Uint8Array, text: string): boolean {
  * assertion patterns. Random binary rarely survives both filters, and the
  * patterns are long enough (≥ 8 chars) that byte-level noise cannot forge
  * them.
+ *
+ * The payload is caller-controlled and this runs on the event loop, so the
+ * scan is hard-budgeted: without caps, a payload of repeated CBOR length
+ * prefixes (e.g. 0x79 + printable filler) would present a ~31 KB candidate
+ * at every byte offset and freeze the process for tens of minutes. Real
+ * assertion strings are far below the caps, so the budget costs nothing in
+ * detection terms.
  */
+const MAX_CANDIDATE_BYTES = 262_144
+const MAX_CANDIDATES = 8_192
+const MAX_SCANNED_BYTES = 4 * 1024 * 1024
+
 function collectSelfDeclared(payload: Uint8Array, location: string, into: Map<string, SelfDeclaredSignal>): void {
+  let candidates = 0
+  let scanned = 0
   for (let i = 0; i + 2 <= payload.length; i++) {
+    if (candidates >= MAX_CANDIDATES || scanned >= MAX_SCANNED_BYTES) return
     const head = payload[i]!
     if ((head & 0xe0) !== 0x60) continue
     const additional = head & 0x1f
@@ -125,7 +139,8 @@ function collectSelfDeclared(payload: Uint8Array, location: string, into: Map<st
         pos += 8
       }
     }
-    if (length < 8 || pos + length > payload.length) continue
+    if (length < 8 || length > MAX_CANDIDATE_BYTES || pos + length > payload.length) continue
+    if (scanned + length > MAX_SCANNED_BYTES) continue
     let printable = true
     for (let k = pos; k < pos + length; k++) {
       const b = payload[k]!
@@ -135,6 +150,8 @@ function collectSelfDeclared(payload: Uint8Array, location: string, into: Map<st
       }
     }
     if (!printable) continue
+    candidates += 1
+    scanned += length
     const text = new TextDecoder().decode(payload.subarray(pos, pos + length))
     const lower = text.toLowerCase()
     for (const pattern of SELF_DECLARED_PATTERNS) {

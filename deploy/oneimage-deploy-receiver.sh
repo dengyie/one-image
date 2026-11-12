@@ -162,7 +162,7 @@ grep -Eq '"status":"(ok|degraded)"' /tmp/oneimage-health.json || { rollback_curr
 capabilities_ok=''
 for attempt in $(seq 1 10); do
   if curl_probe --fail --silent --show-error --max-time 5 "$capabilities_url" >/tmp/oneimage-capabilities.json 2>/dev/null \
-    && grep -q '"maxInputBytes"' /tmp/oneimage-capabilities.json; then
+    && grep -q '"maxInputBytes"' /tmp/oneimage-capabilities.json     && grep -q '"smartErase"' /tmp/oneimage-capabilities.json; then
     capabilities_ok=1
     break
   fi

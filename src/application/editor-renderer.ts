@@ -461,7 +461,17 @@ function applySharpen(context: CanvasRenderingContext2D | OffscreenCanvasRenderi
   const height = Math.min(context.canvas.height - y, Math.ceil(rect.height))
   if (x < 0 || y < 0 || width < 2 || height < 2) return
   const image = context.getImageData(x, y, width, height)
-  const source = new Uint8ClampedArray(image.data)
+  // The convolution must read pre-filter neighbor values, so a copy of the
+  // plane is semantically required — but it is fully overwritten each call,
+  // so one scratch per size is reused across frames instead of allocating a
+  // ~17MB array per rAF frame during slider sweeps.
+  const key = `${width}x${height}`
+  let source = sharpenScratch.get(key)
+  if (!source || source.length !== image.data.length) {
+    source = new Uint8ClampedArray(image.data.length)
+    sharpenScratch.set(key, source)
+  }
+  source.set(image.data)
   const strength = Math.min(1, amount / 100)
   for (let row = 1; row < height - 1; row += 1) for (let column = 1; column < width - 1; column += 1) {
     const index = (row * width + column) * 4
@@ -473,6 +483,8 @@ function applySharpen(context: CanvasRenderingContext2D | OffscreenCanvasRenderi
   }
   context.putImageData(image, x, y)
 }
+
+const sharpenScratch = new Map<string, Uint8ClampedArray>()
 
 function cssFilter(adjustments: Adjustments): string {
   return `brightness(${Math.max(0, 1 + adjustments.brightness / 100)}) contrast(${Math.max(0, 1 + adjustments.contrast / 100)}) saturate(${Math.max(0, 1 + adjustments.saturation / 100)}) blur(${Math.max(0, adjustments.blur)}px)`
