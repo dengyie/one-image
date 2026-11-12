@@ -480,6 +480,29 @@ export function onMiganWarmChange(
   poolFor({ ...options, kind: 'migan' }).onWarmChange(listener)
 }
 
+/**
+ * After the boot-time prewarm cycle gives up, keep trying gently forever:
+ * one single attempt per interval (never concurrent with the initial cycle —
+ * maintenance starts only after it finished). On a storm-prone host the warm
+ * lands whenever a calm window comes, lighting the tier up with zero user
+ * interaction. The timer is unref'd so shutdown never waits on it.
+ */
+export function maintainInpaintWarm(
+  options: { modelPath: string; entryPath?: string; kind?: 'lama' | 'migan' },
+  hooks: { log: (fields: Record<string, unknown>, msg: string) => void },
+  intervalMs = 15 * 60_000,
+): void {
+  const pool = poolFor(options)
+  const kind = options.kind ?? 'lama'
+  const tick = () => {
+    if (pool.isWarm()) return
+    void pool.prewarm(1, 0).then((warmed) => {
+      if (warmed) hooks.log({ modelPath: options.modelPath, kind }, 'inpaint tier warmed by maintenance prewarm')
+    })
+  }
+  setInterval(tick, intervalMs).unref()
+}
+
 // ---------------------------------------------------------------------------
 // Child side: resident ORT session answering IPC requests.
 // ---------------------------------------------------------------------------
@@ -548,15 +571,21 @@ export async function runLamaWorkerLoop(getModelPath: () => string | null): Prom
             // (holes-only tiling) and the probe would prove nothing. The
             // output is discarded; only "one tile went through end to end"
             // matters.
-            const probeMask = new Uint8Array(TILE * TILE * 4)
+            // The probe's own transient activation peak decides whether the
+            // child survives warm on the storm-prone host: a 512 probe costs
+            // ~80MB transient, a 256 probe ~20MB (the migan model is
+            // dynamic-shaped). Real requests at bigger dims that still OOM
+            // are covered by the frontend's browser-worker fallback.
+            const probeSize = childKind === 'migan' ? 256 : TILE
+            const probeMask = new Uint8Array(probeSize * probeSize * 4)
             probeMask[0] = 255
             probeMask[1] = 255
             probeMask[2] = 255
             probeMask[3] = 255
             const probePlanes = {
-              width: TILE,
-              height: TILE,
-              image: new Uint8Array(TILE * TILE * 4).fill(128),
+              width: probeSize,
+              height: probeSize,
+              image: new Uint8Array(probeSize * probeSize * 4).fill(128),
               mask: probeMask,
             }
             const probe = childKind === 'migan'

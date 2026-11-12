@@ -104,3 +104,4 @@ Select and contract-test the first AI image generation provider with explicit co
 - **review 第四批（11-13，PR #54）**：线上 `88a2a6da`，466 tests。手势门控 undo/redo、toast 清理、saveLocalHistory 诚实 null、useDraftPersistence hook（App.tsx 1851 行）、CI per-ref 并发+deploy 串行组。**教训：workflow job 级 concurrency 缩进错位 = 幽灵 job 0s 解析失败且无注释，PyYAML 本地校验**。Backlog：useWorkingSet/BottomDock context（纯重构，记 backlog）。
 - **review 第五批（11-13，PR #55）**：线上 `92bc5fb2`。预览直写主画布 + scratch 池 + wheel 原生监听——frontend review 表全部处理完毕。深度 review 五批全收口：466 tests、App.tsx 1851 行、无已知缺陷。
 - **MI-GAN 服务档（11-13，PR #56-58）**：标准层上服务器（同模型免下载、原生推理 3× 快）。pool 按 kind 泛化 + route engine 参数 + 双 warm 门 + 前端回退。宿主风暴仍杀 126MB migan child（诚实门兜底）；ONEIMAGE_INPAINT_PREWARM=migan 部署、退避 ×20 收敛轰炸。stale todo 关闭：out.log 活跃、隧道 ~2MB/s 无 502。
+- **MI-GAN int8（11-13，§16.57）**：服务档模型 int8 化（45MB/902ms/品质合理），migan 会话 arena 关闭（Linux BFC 高水位钉死 80MB）+ 256 probe（风暴存活阈值 55MB）。pxed env 已切 int8；当前风暴相位未 warm——诚实门兜底浏览器回退，平静窗口自动点亮。
