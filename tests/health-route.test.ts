@@ -21,3 +21,29 @@ describe('health route', () => {
     await app.close()
   })
 })
+
+describe('health route inpaint warm enrichment', () => {
+  it('reports live inpaint warm states when wired', async () => {
+    const app = Fastify()
+    registerHealthRoute(app, {
+      providerConfigured: true,
+      inpaintWarm: { lama: false, migan: true },
+    })
+    const response = await app.inject({ method: 'GET', url: '/healthz' })
+    expect(response.statusCode).toBe(200)
+    expect(JSON.parse(response.body)).toEqual({
+      status: 'ok',
+      providerConfigured: true,
+      inpaintWarm: { lama: false, migan: true },
+    })
+  })
+
+  it('omits the inpaint section when not wired (deploy-safe for the receiver probe)', async () => {
+    const app = Fastify()
+    registerHealthRoute(app, { providerConfigured: true })
+    const response = await app.inject({ method: 'GET', url: '/healthz' })
+    const body = JSON.parse(response.body)
+    expect(body.inpaintWarm).toBeUndefined()
+    expect(body.status).toBe('ok')
+  })
+})
