@@ -77,7 +77,19 @@ async function main(): Promise<void> {
       })
     : undefined
 
-  registerHealthRoute(app, { providerConfigured: Boolean(process.env.OPENAI_API_KEY) })
+  registerHealthRoute(app, {
+    providerConfigured: Boolean(process.env.OPENAI_API_KEY),
+    // A getter: the health check reads the live warm state per request, so
+    // monitoring sees tier loss/recovery the moment it happens.
+    inpaintWarm: {
+      get lama() {
+        return lamaModelPath ? isLamaWarm({ modelPath: lamaModelPath }) : false
+      },
+      get migan() {
+        return miganModelPath ? isMiganWarm({ modelPath: miganModelPath }) : false
+      },
+    },
+  })
   // Server-side smart-erase (LaMa): resolved from env + existsSync at boot —
   // null degrades the surface to a 503 and hides the browser tier without
   // blocking startup or touching the deploy health budget.

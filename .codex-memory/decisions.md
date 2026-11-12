@@ -111,3 +111,7 @@
 ## 2026-11-13 useWorkingSet/BottomDock context 化有意不做
 
 - 纯代码搬运（无行为变化、无可新增断言），在已生产验证的 1900 行组件上搬 50+ 接线点的回归风险 > 可维护性收益。显式记 backlog 而非赶工。同理裁定收口：深度 review 全部 actionable 项至此处理完毕（P0/P1/P2 已修，P3 已修或论证）。
+
+## 2026-11-13 squash 合并后核对 main 树（流程定案）
+
+PR squash 的 SHA 不保证包含分支上"看似已推"的提交——rebase 重放时的行尾/补丁差可让提交被误判跳过。**每个 PR 合并后必须 `git diff <上一_release_sha> <new_main_sha>` 核对实际差异**，再触发/确认部署。本次发现 #64 的 squash 缺失图章代码，直推纠正（a234665，CI 绿）。
