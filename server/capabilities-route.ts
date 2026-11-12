@@ -11,6 +11,8 @@ export interface PublicCapabilities {
   // receiver's grep probe.
   smartErase?: {
     lamaAvailable: boolean
+    /** MI-GAN server tier (标准 model executed on the host): live warm gate. */
+    miganServerAvailable: boolean
   }
 }
 

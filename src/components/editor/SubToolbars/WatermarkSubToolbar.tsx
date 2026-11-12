@@ -54,7 +54,7 @@ const ERASE_BRUSH_SIZES = [
 const ERASE_MODES: Array<{ value: SmartEraseMode; label: string; hint: string }> = [
   { value: 'auto', label: '自动', hint: '按选区大小自动选择：小选区本地扩散，大选区高斯磨砂——均为纯本地算法，不下载模型、不重采样、不生成' },
   { value: 'classical', label: '快速', hint: '纯本地扩散填充：不下载模型、不重采样，掩膜外逐位不变' },
-  { value: 'migan', label: '标准', hint: 'MI-GAN 合成填充（实验性）：仅建议平坦背景使用，纹理背景下可能出现明显色块；首次需下载 27MB 模型' },
+  { value: 'migan', label: '标准', hint: 'MI-GAN 合成填充（实验性）：仅建议平坦背景使用，纹理背景下可能出现明显色块；服务端可用时选区会上传到服务器推理（免 27MB 模型下载），否则回退浏览器本地运行' },
   { value: 'lama', label: '高质量', hint: '服务端 LaMa 合成填充：模型常驻服务器、浏览器零下载，大区域修复质量上限更高；仅选区区域会上传到服务器处理，掩膜外像素逐位不变' },
 ]
 
