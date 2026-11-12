@@ -24,6 +24,8 @@ export interface EraseRunInput {
   eraseMode: SmartEraseMode
   modeOverride?: SmartEraseMode
   serverLamaAvailable: boolean
+  /** MI-GAN server tier warm: the 标准 provider runs host-side instead of in the worker. */
+  serverMiganAvailable: boolean
   onStage: (stage: SmartEraseStage | null) => void
 }
 
@@ -32,7 +34,7 @@ export type EraseRunOutcome =
   | { ok: true; resultFile: File; provider: FillProvider; regions: number; clearedMask: AnnotationLayer[] }
 
 export async function runErasePipeline(input: EraseRunInput): Promise<EraseRunOutcome> {
-  const { decodedSource, file, state, factory, eraseType, eraseMode, modeOverride, serverLamaAvailable, onStage } = input
+  const { decodedSource, file, state, factory, eraseType, eraseMode, modeOverride, serverLamaAvailable, serverMiganAvailable, onStage } = input
   // exportEditor strips the marquee layers itself; the mask is drawn from
   // the unstripped state through the same transform pipeline.
   const snapshot = await exportEditor(decodedSource, state, factory, 'image/png', 1)
@@ -109,10 +111,12 @@ export async function runErasePipeline(input: EraseRunInput): Promise<EraseRunOu
   const alphaData = alphaCtx.getImageData(0, 0, width, height)
 
   let result: ImageData
-  if (provider === 'lama') {
-    // Server tier: crop to the mask neighborhood, upload the pair, blend
-    // the returned fill through the same feathered composite. The canvases
-    // are still alive here (the classical retry below relies on that too).
+  // Server tiers share one flow: crop to the mask neighborhood, upload the
+  // pair, blend the returned fill through the same feathered composite. The
+  // migan provider additionally falls back to the browser worker when the
+  // server tier is unavailable or fails — it is the same model on-device.
+  const serverEngine = provider === 'lama' ? 'lama' : provider === 'migan' && serverMiganAvailable ? 'migan' : null
+  if (serverEngine) {
     onStage({ phase: 'upload' })
     const rect = computeLamaCropRect(maskGrid)
     if (!rect) {
@@ -132,13 +136,23 @@ export async function runErasePipeline(input: EraseRunInput): Promise<EraseRunOu
     const imageBlob = await encodeLamaCrop(imageCanvas as unknown as CanvasImageSource, rect, factory, createBlob)
     const maskBlob = await encodeLamaCrop(refineCanvas as unknown as CanvasImageSource, rect, factory, createBlob)
     onStage({ phase: 'inference', provider: 'lama' })
-    const response = await postServerLama(
-      { imageBase64: await blobToBase64(imageBlob), maskBase64: await blobToBase64(maskBlob) },
+    let response = await postServerLama(
+      { imageBase64: await blobToBase64(imageBlob), maskBase64: await blobToBase64(maskBlob), engine: serverEngine },
       { timeoutMs: 110_000 },
     )
-    if (!response.ok || !response.data) {
-      throw new Error(response.message ?? '服务端修复失败')
-    }
+    // MI-GAN degrades to the on-device worker rather than failing the edit:
+    // the 标准 tier kept its offline guarantee, the server tier is an
+    // optimization (no model download, native inference) layered on top.
+    if (!response.ok && serverEngine === 'migan') {
+      const fallback = await runSmartErase(
+        { image: imageData, mask: maskData, composite: alphaData, provider: 'migan' },
+        onStage
+      )
+      result = fallback
+    } else {
+      if (!response.ok || !response.data) {
+        throw new Error(response.message ?? '服务端修复失败')
+      }
     const filledBlob = await (async () => {
       const bytes = Uint8Array.from(atob(response.data!.image.base64), (ch) => ch.charCodeAt(0))
       return new Blob([bytes], { type: 'image/png' })
@@ -160,6 +174,7 @@ export async function runErasePipeline(input: EraseRunInput): Promise<EraseRunOu
         { data: alphaData.data, width, height },
       ),
     )
+    }
   } else {
     try {
       result = await runSmartErase(

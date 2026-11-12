@@ -21,8 +21,12 @@ import {
   CHILD_ENV_FLAG,
   disposeLamaPools,
   isLamaWarm,
+  isMiganWarm,
   onLamaWarmChange,
+  onMiganWarmChange,
   prewarmLama,
+  prewarmMigan,
+  resolveMiganModelPath,
   runLamaWorkerLoop,
 } from './lama-inpaint'
 
@@ -80,14 +84,21 @@ async function main(): Promise<void> {
   // The flag is live: it flips on once a session is proven (create + a full
   // tile run) and back off if the child dies, so the browser never shows a
   // tier the host cannot currently serve.
+  const miganModelPath = resolveMiganModelPath()
   const capabilities: PublicCapabilities = {
     provenance: { enabled: Boolean(process.env.OPENAI_API_KEY), provider: process.env.OPENAI_API_KEY ? 'openai' : null, maxInputBytes },
-    smartErase: { lamaAvailable: false },
+    smartErase: { lamaAvailable: false, miganServerAvailable: false },
   }
   registerCapabilitiesRoute(app, capabilities)
   if (lamaModelPath) {
     onLamaWarmChange({ modelPath: lamaModelPath }, (warmed) => {
       capabilities.smartErase!.lamaAvailable = warmed
+    })
+  }
+  app.log.info({ lama: Boolean(lamaModelPath), migan: Boolean(miganModelPath) }, 'inpaint pools resolved')
+  if (miganModelPath) {
+    onMiganWarmChange({ modelPath: miganModelPath }, (warmed) => {
+      capabilities.smartErase!.miganServerAvailable = warmed
     })
   }
   registerSameOriginGuard(app)
@@ -127,6 +138,8 @@ async function main(): Promise<void> {
   registerSmartEraseRoutes(app, appDb.db, {
     modelPath: lamaModelPath,
     isWarm: () => (lamaModelPath ? isLamaWarm({ modelPath: lamaModelPath }) : false),
+    miganModelPath,
+    miganIsWarm: () => (miganModelPath ? isMiganWarm({ modelPath: miganModelPath }) : false),
     rateLimiter: smartEraseRateLimiter,
     dailyCap: Number.isFinite(rawSmartEraseCap) && rawSmartEraseCap >= 1 ? Math.floor(rawSmartEraseCap) : 30,
   })
@@ -158,6 +171,11 @@ async function main(): Promise<void> {
   if (lamaModelPath) {
     void prewarmLama({ modelPath: lamaModelPath }).then((warmed) => {
       app.log.info({ warmed }, 'lama prewarm finished')
+    })
+  }
+  if (miganModelPath) {
+    void prewarmMigan({ modelPath: miganModelPath }).then((warmed) => {
+      app.log.info({ warmed }, 'migan prewarm finished')
     })
   }
 }

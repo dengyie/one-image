@@ -46,6 +46,7 @@ function minimalInput(annotations: EraseRunInput['state']['annotations']): Erase
     eraseType: 'ai',
     eraseMode: 'auto',
     serverLamaAvailable: false,
+    serverMiganAvailable: false,
     onStage: () => {},
   }
 }

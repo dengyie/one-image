@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { runMiganTiling } from './migan-inpaint'
 import { createRequire } from 'node:module'
 import { fork } from 'node:child_process'
 
@@ -34,6 +35,13 @@ export function resolveLamaModelPath(env: NodeJS.ProcessEnv = process.env): stri
   return existsSync(path) ? path : null
 }
 
+export function resolveMiganModelPath(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.ONEIMAGE_MIGAN_MODEL_PATH
+  if (!raw || raw.trim().length === 0) return null
+  const path = raw.trim()
+  return existsSync(path) ? path : null
+}
+
 export interface RgbaPlane {
   width: number
   height: number
@@ -51,11 +59,11 @@ export interface LamaRunResult {
 export interface SessionLike {
   inputNames: readonly string[]
   outputNames: readonly string[]
-  run(feeds: Record<string, unknown>): Promise<Record<string, { data: Float32Array }>>
+  run(feeds: Record<string, unknown>): Promise<Record<string, { data: Float32Array | Uint8Array }>>
 }
 
 export interface TensorCtor {
-  Tensor: new (type: string, data: Float32Array, dims: number[]) => unknown
+  Tensor: new (type: string, data: Float32Array | Uint8Array, dims: number[]) => unknown
 }
 
 function isHole(mask: Uint8Array, offset: number): boolean {
@@ -209,6 +217,7 @@ export class LamaProcessPool {
     private modelPath: string,
     private entryPath: string,
     private forkFn: ForkFn = defaultFork,
+    private kind: 'lama' | 'migan' = 'lama',
   ) {}
 
   /** Whether a proven session is resident right now. */
@@ -326,7 +335,7 @@ export class LamaProcessPool {
     this.spawning = (async () => {
       const child = this.forkFn(this.entryPath, {
         serialization: 'advanced',
-        env: { ...process.env, [CHILD_ENV_FLAG]: '1' },
+        env: { ...process.env, [CHILD_ENV_FLAG]: '1', ONEIMAGE_INPAINT_CHILD_KIND: this.kind },
         stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
       })
       let exited = false
@@ -428,13 +437,37 @@ export function disposeLamaPools(): void {
   pools.clear()
 }
 
-function poolFor(options: { modelPath: string; entryPath?: string }): LamaProcessPool {
-  let target = pools.get(options.modelPath)
+function poolFor(options: { modelPath: string; entryPath?: string; kind?: 'lama' | 'migan' }): LamaProcessPool {
+  const kind = options.kind ?? 'lama'
+  const key = `${kind}:${options.modelPath}`
+  let target = pools.get(key)
   if (!target) {
-    target = new LamaProcessPool(options.modelPath, options.entryPath ?? __filename)
-    pools.set(options.modelPath, target)
+    target = new LamaProcessPool(options.modelPath, options.entryPath ?? __filename, defaultFork, kind)
+    pools.set(key, target)
   }
   return target
+}
+
+export function runMiganInpaint(
+  input: { width: number; height: number; image: Uint8Array; mask: Uint8Array },
+  options: { modelPath: string; entryPath?: string },
+): Promise<LamaRunResult> {
+  return poolFor({ ...options, kind: 'migan' }).run(input)
+}
+
+export function prewarmMigan(options: { modelPath: string; entryPath?: string }, attempts?: number): Promise<boolean> {
+  return poolFor({ ...options, kind: 'migan' }).prewarm(attempts)
+}
+
+export function isMiganWarm(options: { modelPath: string; entryPath?: string }): boolean {
+  return poolFor({ ...options, kind: 'migan' }).isWarm()
+}
+
+export function onMiganWarmChange(
+  options: { modelPath: string; entryPath?: string },
+  listener: (warmed: boolean) => void,
+): void {
+  poolFor({ ...options, kind: 'migan' }).onWarmChange(listener)
 }
 
 // ---------------------------------------------------------------------------
@@ -442,11 +475,18 @@ function poolFor(options: { modelPath: string; entryPath?: string }): LamaProces
 // ---------------------------------------------------------------------------
 
 export async function runLamaWorkerLoop(getModelPath: () => string | null): Promise<void> {
+  const childKind = (process.env.ONEIMAGE_INPAINT_CHILD_KIND ?? 'lama') as 'lama' | 'migan'
+  // The caller's resolver is wired for the lama env; a migan child must read
+  // its own env key or its warm fails with a null path (silently, retrying
+  // forever).
+  const effectiveGetModelPath = childKind === 'migan'
+    ? () => resolveMiganModelPath()
+    : getModelPath
   process.stderr.write('[lama-child] loop registered, loading ort...')
   const requireOrt = createRequire(__filename)
   const ort = requireOrt('onnxruntime-node') as unknown as {
     InferenceSession: { create(path: string, options?: unknown): Promise<SessionLike> }
-    Tensor: new (type: string, data: Float32Array, dims: number[]) => unknown
+    Tensor: new (type: string, data: Float32Array | Uint8Array, dims: number[]) => unknown
   }
   process.stderr.write('[lama-child] ort loaded')
   let session: SessionLike | null = null
@@ -481,7 +521,7 @@ export async function runLamaWorkerLoop(getModelPath: () => string | null): Prom
       if (message?.type === 'warm') {
         void (async () => {
           try {
-            const modelPath = getModelPath()
+            const modelPath = effectiveGetModelPath()
             if (!modelPath) throw new Error('model path missing in child')
             const workerSession = await ensureSession(modelPath)
             // Probe the full inference path, not just session creation: on
@@ -497,12 +537,15 @@ export async function runLamaWorkerLoop(getModelPath: () => string | null): Prom
             probeMask[1] = 255
             probeMask[2] = 255
             probeMask[3] = 255
-            const probe = await runLamaTiling(workerSession, ort, {
+            const probePlanes = {
               width: TILE,
               height: TILE,
               image: new Uint8Array(TILE * TILE * 4).fill(128),
               mask: probeMask,
-            })
+            }
+            const probe = childKind === 'migan'
+              ? await runMiganTiling(workerSession, ort, probePlanes)
+              : await runLamaTiling(workerSession, ort, probePlanes)
             if (probe.tiles !== 1) throw new Error(`warm probe ran ${probe.tiles} tiles`)
             process.send?.({ type: 'warmed' })
           } catch (err) {
@@ -518,19 +561,18 @@ export async function runLamaWorkerLoop(getModelPath: () => string | null): Prom
       // semaphore-free design relies on the child being the queue.
       const run = async () => {
         try {
-          const modelPath = getModelPath()
+          const modelPath = effectiveGetModelPath()
           if (!modelPath) throw new Error('model path missing in child')
           const workerSession = await ensureSession(modelPath)
-          const result = await runLamaTiling(
-            workerSession,
-            ort,
-            {
-              width: Number(message.width),
-              height: Number(message.height),
-              image: message.image as Uint8Array,
-              mask: message.mask as Uint8Array,
-            },
-          )
+          const planes = {
+            width: Number(message.width),
+            height: Number(message.height),
+            image: message.image as Uint8Array,
+            mask: message.mask as Uint8Array,
+          }
+          const result = childKind === 'migan'
+            ? await runMiganTiling(workerSession, ort, planes)
+            : await runLamaTiling(workerSession, ort, planes)
           process.send?.({ type: 'result', id, rgba: result.rgba, ms: result.ms, tiles: result.tiles })
         } catch (err) {
           process.send?.({ type: 'result', id, error: err instanceof Error ? err.message : String(err) })

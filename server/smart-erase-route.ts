@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { DatabaseSync } from 'node:sqlite'
 import { decodePngRgba, encodePngRgba } from './png'
 import { runLamaInpaint, resolveLamaModelPath } from './lama-inpaint'
+import { runMiganInpaint } from './lama-inpaint'
 export { resolveLamaModelPath }
 import type { RateLimiter } from './rate-limit'
 import { addUsage, readUsage, resolveUsageClientKey, todayKey } from './usage-ledger'
@@ -18,8 +19,13 @@ export interface SmartEraseRouteOptions {
   // misleading 500). Optional for tests; the pool-backed default is wired in
   // server/index.ts.
   isWarm?: () => boolean
-  // Test injection: swap the real ORT run for a fake.
+  // MI-GAN server tier (the browser 标准 model, host-executed). Same shape as
+  // the LaMa wiring: null disables the engine, isWarm gates it live.
+  miganModelPath?: string | null
+  miganIsWarm?: () => boolean
+  // Test injection: swap the real ORT runs for fakes.
   runInpaint?: typeof runLamaInpaint
+  runMiganInpaint?: typeof runMiganInpaint
 }
 
 // The client always speaks PNG here (canvas.toBlob): the server owns a
@@ -57,18 +63,25 @@ function readPngPlane(
 export function registerSmartEraseRoutes(app: FastifyInstance, db: DatabaseSync, options: SmartEraseRouteOptions): void {
   const rateLimiter = options.rateLimiter
   const runInpaint = options.runInpaint ?? runLamaInpaint
+  const runMigan = options.runMiganInpaint ?? runMiganInpaint
 
   app.post('/api/v1/smart-erase', async (request: FastifyRequest<{
-    Body: { image?: { base64?: string }; mask?: { base64?: string } }
+    Body: { image?: { base64?: string }; mask?: { base64?: string }; engine?: string }
   }>, reply: FastifyReply) => {
-    if (!options.modelPath) {
+    if (!options.modelPath && !options.miganModelPath) {
       return reply.status(503).send({ error: 'smart_erase_unconfigured', message: '服务端修复模型未配置' })
+    }
+    // Engine selection: lama (默认/高质量) or migan (标准的服务端形态). An
+    // unknown value degrades to lama rather than failing.
+    const engine = (request.body as { engine?: string } | undefined)?.engine === 'migan' ? 'migan' : 'lama'
+    if (engine === 'migan' && (!options.miganModelPath || (options.miganIsWarm && !options.miganIsWarm()))) {
+      return reply.status(503).send({ error: 'smart_erase_warming', message: '服务端修复引擎预热中，请稍后再试' })
     }
     // The warm gate: without a proven resident session a run would almost
     // certainly OOM mid-flight on the memory-starved host. Answer 503 (the
     // capabilities flag hides the tier for browsers; this catches stale UIs
     // and direct callers) instead of burning a billed attempt on a 500.
-    if (options.isWarm && !options.isWarm()) {
+    if (engine === 'lama' && options.isWarm && !options.isWarm()) {
       return reply.status(503).send({ error: 'smart_erase_warming', message: '服务端修复引擎预热中，请稍后再试' })
     }
     if (rateLimiter && !rateLimiter.allow(request)) {
@@ -109,12 +122,15 @@ export function registerSmartEraseRoutes(app: FastifyInstance, db: DatabaseSync,
 
     try {
       const started = performance.now()
-      const result = await runInpaint({
+      const planes = {
         width: imageResult.image.width,
         height: imageResult.image.height,
         image: imageResult.image.rgba,
         mask: maskResult.image.rgba,
-      }, { modelPath: options.modelPath })
+      }
+      const result = engine === 'migan'
+        ? await runMigan(planes, { modelPath: options.miganModelPath! })
+        : await runInpaint(planes, { modelPath: options.modelPath! })
       request.log.info({
         ms: Math.round(performance.now() - started),
         engineMs: result.ms,

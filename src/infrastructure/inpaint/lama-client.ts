@@ -107,7 +107,7 @@ export interface ServerLamaResponse {
  * the tier, everything else surfaces the server's Chinese message.
  */
 export async function postServerLama(
-  payload: { imageBase64: string; maskBase64: string },
+  payload: { imageBase64: string; maskBase64: string; engine?: 'lama' | 'migan' },
   options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<{ ok: boolean; data?: ServerLamaResponse; message?: string }> {
   const signals = [options.signal, typeof options.timeoutMs === 'number' ? AbortSignal.timeout(options.timeoutMs) : undefined].filter(
@@ -119,7 +119,7 @@ export async function postServerLama(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ image: { base64: payload.imageBase64 }, mask: { base64: payload.maskBase64 } }),
+      body: JSON.stringify({ image: { base64: payload.imageBase64 }, mask: { base64: payload.maskBase64 }, engine: payload.engine ?? 'lama' }),
       signal,
     })
     const data = (await res.json().catch(() => null)) as { message?: string; image?: { mimeType: string; base64: string } } | null

@@ -187,6 +187,8 @@ export function App() {
   // imagegen surface; the toolbar hides the 高质量 tier when the host lacks
   // the deployed model.
   const [serverLamaAvailable, setServerLamaAvailable] = useState(false)
+  // MI-GAN server tier (标准 model executed host-side; live warm gate).
+  const [serverMiganAvailable, setServerMiganAvailable] = useState(false)
   // Smart erase (browser-local fillers: diffusion / Gaussian frost / optional MI-GAN)
   const [isSmartErasing, setIsSmartErasing] = useState(false)
   const [smartEraseStage, setSmartEraseStage] = useState<SmartEraseStage | null>(null)
@@ -381,8 +383,9 @@ export function App() {
       })
       void fetch('/api/v1/capabilities', { credentials: 'include' })
         .then((res) => (res.ok ? res.json() : null))
-        .then((data: { smartErase?: { lamaAvailable?: boolean } } | null) => {
+        .then((data: { smartErase?: { lamaAvailable?: boolean; miganServerAvailable?: boolean } } | null) => {
           setServerLamaAvailable(data?.smartErase?.lamaAvailable === true)
+          setServerMiganAvailable(data?.smartErase?.miganServerAvailable === true)
         })
         .catch(() => undefined)
     }
@@ -966,6 +969,7 @@ export function App() {
         eraseMode,
         modeOverride,
         serverLamaAvailable,
+        serverMiganAvailable,
         onStage: setSmartEraseStage,
       })
       if (!outcome.ok) {
@@ -1011,7 +1015,7 @@ export function App() {
       setIsSmartErasing(false)
       setSmartEraseStage(null)
     }
-  }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode, serverLamaAvailable, isOneClickCleaning, isPreparingRegen])
+  }, [decodedSource, file, factory, documentSwitcher, showToast, commitEdit, eraseMode, serverLamaAvailable, serverMiganAvailable, isOneClickCleaning, isPreparingRegen])
 
   // Lossless metadata cleanup, shared by the standalone strip button and the
   // one-click watermark entry. Pristine files get pure container surgery

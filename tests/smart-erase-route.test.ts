@@ -241,3 +241,85 @@ describe('smart-erase warm gate', () => {
     appDb.close()
   })
 })
+
+describe('smart-erase engine selection', () => {
+  const payload = () => ({
+    image: { base64: solidPng(256, 128, [1, 2, 3]).toString('base64') },
+    mask: { base64: maskPng(256, 128, { x: 0, y: 0, w: 16, h: 16 }).toString('base64') },
+    engine: 'migan',
+  })
+  const sizedRun = vi.fn(async (input: { width: number; height: number }) => ({
+    rgba: new Uint8Array(input.width * input.height * 4),
+    ms: 2,
+    tiles: 1,
+  }))
+  const buildApp = (options: {
+    miganModelPath?: string | null
+    miganIsWarm?: () => boolean
+    runMiganInpaint?: unknown
+  }) => {
+    const runInpaint = vi.fn(async (input: { width: number; height: number }) => ({
+      rgba: new Uint8Array(input.width * input.height * 4),
+      ms: 1,
+      tiles: 1,
+    }))
+    const app = Fastify()
+    const appDb = initDatabase(':memory:')
+    registerSmartEraseRoutes(app, appDb.db, {
+      modelPath: '/models/lama.onnx',
+      isWarm: () => true,
+      miganModelPath: options.miganModelPath ?? null,
+      miganIsWarm: options.miganIsWarm,
+      dailyCap: 5,
+      runInpaint,
+      runMiganInpaint: options.runMiganInpaint as never,
+    })
+    return { app, appDb, runInpaint }
+  }
+
+  it('routes engine=migan through the migan runner when warm', async () => {
+    const runMiganInpaint = vi.fn(sizedRun)
+    const { app, appDb } = buildApp({
+      miganModelPath: '/models/migan.onnx',
+      miganIsWarm: () => true,
+      runMiganInpaint,
+    })
+    const res = await app.inject({ method: 'POST', url: '/api/v1/smart-erase', payload: payload() })
+    expect(res.statusCode).toBe(200)
+    expect(runMiganInpaint).toHaveBeenCalledTimes(1)
+    appDb.close()
+  })
+
+  it('answers 503 warming for engine=migan while the migan tier is cold', async () => {
+    const runMiganInpaint = vi.fn(sizedRun)
+    const { app } = buildApp({
+      miganModelPath: '/models/migan.onnx',
+      miganIsWarm: () => false,
+      runMiganInpaint,
+    })
+    const res = await app.inject({ method: 'POST', url: '/api/v1/smart-erase', payload: payload() })
+    expect(res.statusCode).toBe(503)
+    expect(JSON.parse(res.body).error).toBe('smart_erase_warming')
+    expect(runMiganInpaint).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 warming for engine=migan when no migan model is deployed', async () => {
+    const runMiganInpaint = vi.fn(sizedRun)
+    const { app } = buildApp({ miganModelPath: null, runMiganInpaint })
+    const res = await app.inject({ method: 'POST', url: '/api/v1/smart-erase', payload: payload() })
+    expect(res.statusCode).toBe(503)
+    expect(JSON.parse(res.body).error).toBe('smart_erase_warming')
+    expect(runMiganInpaint).not.toHaveBeenCalled()
+  })
+
+  it('degrades an unknown engine value to lama', async () => {
+    const { app, runInpaint } = buildApp({ miganModelPath: null, runMiganInpaint: vi.fn(sizedRun) })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/smart-erase',
+      payload: { ...payload(), engine: 'nonsense' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect((runInpaint as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1)
+  })
+})
