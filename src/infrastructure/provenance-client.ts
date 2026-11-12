@@ -43,6 +43,20 @@ export function isProvenanceMimeSupported(mime: string): boolean {
 }
 
 /**
+ * The "did we see an AI-source signal" verdict shared by every provenance
+ * surface: an upstream-detected signal, a local C2PA manifest, or a
+ * producer's self-declared statement. (A miss proves nothing — the caller's
+ * copy still decides the wording.)
+ */
+export function isProvenanceDetected(result: ProvenanceRouteResponse): boolean {
+  return (
+    result.evidence.some((e) => e.outcome === 'detected') ||
+    result.localSignals.some((s) => s.kind === 'C2PA') ||
+    (result.selfDeclared?.length ?? 0) > 0
+  )
+}
+
+/**
  * Builds the human-facing summary shown under the compress toolbar.
  *
  * Two evidence chains with different strength: local metadata signals (a hit
