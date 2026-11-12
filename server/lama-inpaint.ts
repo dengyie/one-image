@@ -274,7 +274,11 @@ export class LamaProcessPool {
         })
         this.setWarm(true)
         return true
-      } catch {
+      } catch (err) {
+        // Warm failures were invisible for days (silent catch); the reason
+        // is the only way to distinguish OOM windows from config drift.
+        process.stderr.write(`[inpaint-pool] warm attempt ${attempt}/${attempts} failed: ${err instanceof Error ? err.message : String(err)}
+`)
         if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, backoffMs * attempt))
       }
     }
