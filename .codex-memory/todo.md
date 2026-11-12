@@ -6,7 +6,7 @@
 
 ## Next
 
-- [ ] Select the first AI image generation provider and document retention, training, pricing, quota, timeout, and error policy.
+- [x] Provider policy documented (2026-11-13, vault §16.64): grok/gemini/gpt-image-1 retention + training (paid APIs do not train; 30-55d abuse retention); quota/timeout/error already in config+routes. Provider selection itself was done earlier (grok default, §16.32/16.45).
 - [ ] Add a provider contract test using a sandbox or deterministic fixture before enabling production traffic.
 
 ## Manual-required
