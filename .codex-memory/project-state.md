@@ -108,3 +108,4 @@ Select and contract-test the first AI image generation provider with explicit co
 - **维护循环（11-13，PR #60/#61）**：boot 3 次快试 → 15 分钟单次维护（maintainInpaintWarm，unref 计时器）——平静窗口 ≤15min 自动点亮。流程教训：PR amend 前先确认未被合并；cherry-pick 冲突中断会留下空分支。
 - **vendor 拆分（11-13，PR #62）**：app 块 187KB（gzip 56KB）+ vendor 缓存稳定——回访部署 -55% 传输。inpaint warm 丢失观测日志上线。迭代收口。
 - **review 第六批（11-13，PR #63）**：笔画 O(1) 追加（长笔画 O(n²) 消失）+ usage-ledger 直测 4 用例（474 tests）。Backlog actionable 清零。
+- **平铺水印图章缓存（11-13，PR #64）**：每帧数百 fillText → 单次 pattern fill（O(1)）。编辑器渲染热点全收口（sharpen/直写/笔画/图章）。
