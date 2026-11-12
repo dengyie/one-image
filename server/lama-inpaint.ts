@@ -232,6 +232,13 @@ export class LamaProcessPool {
 
   private setWarm(warmed: boolean): void {
     if (this.warmed === warmed) return
+    // The false transition is the ops-visible moment: it marks when a resident
+    // tier died (the survival duration between true and false is exactly how
+    // long the host let the model live).
+    if (!warmed && this.warmed) {
+      process.stderr.write(`[inpaint-pool] ${this.kind ?? 'lama'} tier lost (child exited)
+`)
+    }
     this.warmed = warmed
     for (const listener of this.warmListeners) listener(warmed)
   }

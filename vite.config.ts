@@ -30,4 +30,16 @@ export default defineConfig({
     // (all green on rerun): the suites are fast, a bounded pool is cheap.
     maxWorkers: 8,
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Vendor splits into its own chunk: returning visitors keep it in
+        // HTTP cache across deploys (the app chunk changes every release,
+        // the vendor chunk almost never).
+        manualChunks(id: string) {
+          if (id.includes('node_modules')) return 'vendor'
+        },
+      },
+    },
+  },
 })
