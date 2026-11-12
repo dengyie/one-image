@@ -98,14 +98,11 @@ Select and contract-test the first AI image generation provider with explicit co
 - `/proc/meminfo` 在 ECI 宿主被 lxcfs 虚拟化（Slab=0 假象），真实水位只看 `/proc/zoneinfo`。
 - 影子实例已撤；19 个曾停服务已全部恢复（49 RUNNING）。详见 vault §16.50。
 - **本机点亮验证（11-12）**：生产同款 bundle 本机 200/2.9s、洞外 bit-exact True、capabilities 动态翻转实测——P0 修复经真实 IPC 验证，「升配即点亮」为实测事实（详见 vault §16.50 追记）。
-- **深度 review 加固（11-13，PR #51）**：线上 `f79667a6`。CBOR 扫描预算（匿名 DoS）、上游响应字节封顶、优雅关闭 disposeLamaPools、估算预览化、sharpen scratch、掩膜失败恢复、worker 看门狗、fastify/ORT 安全升级（ORT 1.31 原生跳跃经本地真实推理 bit-exact 背书）、CI audit 门、receiver 探针补 smartErase。Backlog 见 vault §16.51。
-- **review 第二批（11-13，PR #52）**：线上 `8afc2a04`。token 时序比较、scrypt N=2^16（maxmem 必须显式，32MB 默认拒绝 2^16）+s2$ 自描述格式+登录重哈希、ECONNRESET 双扣费收窄、email-code/auth-password 直测（457 tests）、5 modal lazy + PointerRipples 门控（主 chunk 404.9KB）、CI 归档断言。
-- **review 第三批（11-13，PR #53）**：线上 `4b3b2911`，466 tests。history 字节预算+原子合并、擦除管线抽取（App.tsx 1927 行）、downloadBlob/isProvenanceDetected 去重、onemail/cloud-quota 补测。Backlog 仅剩：App.tsx 后续 hook 抽取、BottomDock context 化（纯重构）；SSRF/XFF 有意不修（decisions.md）。
-- **review 第四批（11-13，PR #54）**：线上 `88a2a6da`，466 tests。手势门控 undo/redo、toast 清理、saveLocalHistory 诚实 null、useDraftPersistence hook（App.tsx 1851 行）、CI per-ref 并发+deploy 串行组。**教训：workflow job 级 concurrency 缩进错位 = 幽灵 job 0s 解析失败且无注释，PyYAML 本地校验**。Backlog：useWorkingSet/BottomDock context（纯重构，记 backlog）。
-- **review 第五批（11-13，PR #55）**：线上 `92bc5fb2`。预览直写主画布 + scratch 池 + wheel 原生监听——frontend review 表全部处理完毕。深度 review 五批全收口：466 tests、App.tsx 1851 行、无已知缺陷。
-- **MI-GAN 服务档（11-13，PR #56-58）**：标准层上服务器（同模型免下载、原生推理 3× 快）。pool 按 kind 泛化 + route engine 参数 + 双 warm 门 + 前端回退。宿主风暴仍杀 126MB migan child（诚实门兜底）；ONEIMAGE_INPAINT_PREWARM=migan 部署、退避 ×20 收敛轰炸。stale todo 关闭：out.log 活跃、隧道 ~2MB/s 无 502。
-- **MI-GAN int8（11-13，§16.57）**：服务档模型 int8 化（45MB/902ms/品质合理），migan 会话 arena 关闭（Linux BFC 高水位钉死 80MB）+ 256 probe（风暴存活阈值 55MB）。pxed env 已切 int8；当前风暴相位未 warm——诚实门兜底浏览器回退，平静窗口自动点亮。
-- **维护循环（11-13，PR #60/#61）**：boot 3 次快试 → 15 分钟单次维护（maintainInpaintWarm，unref 计时器）——平静窗口 ≤15min 自动点亮。流程教训：PR amend 前先确认未被合并；cherry-pick 冲突中断会留下空分支。
-- **vendor 拆分（11-13，PR #62）**：app 块 187KB（gzip 56KB）+ vendor 缓存稳定——回访部署 -55% 传输。inpaint warm 丢失观测日志上线。迭代收口。
-- **review 第六批（11-13，PR #63）**：笔画 O(1) 追加（长笔画 O(n²) 消失）+ usage-ledger 直测 4 用例（474 tests）。Backlog actionable 清零。
-- **平铺水印图章缓存（11-13，PR #64）**：每帧数百 fillText → 单次 pattern fill（O(1)）。编辑器渲染热点全收口（sharpen/直写/笔画/图章）。
+- **2026-11-13 全天（九批迭代 + 资产上云，PR #51–65，测试 443→476）**：
+  - **LaMa 服务端化上线（诚实门形态）**：INT8 qdq2 模型（59MB）常驻 child + pool 生命周期（kind 泛化、per-engine warm 门、维护循环 15 分钟单次）+ route engine 参数 + capabilities/healthz 实时 warm 态 + 前端服务端优先/浏览器回退。pxed 风暴相位 warm 不落（诚实门隐藏档位、浏览器兜底），平静窗口自动点亮；lama 档待 owner 升配（fp32 499MB run 峰值数学死局已定案）。
+  - **MI-GAN 服务档（标准层上服务器）**：int8 模型 10MB（45MB create/902ms，品质合理）+ arena 关闭（Linux BFC 高水位钉死问题）+ 256 probe（存活阈值 126→55MB）——风暴相位同样未落，维护循环重试中。
+  - **深度 review 全收口**：P0×1（pool result 处理器缺失）+ P1×5（prewarm 挂死/CBOR 匿名 DoS/估算全分辨率/sharpen 每帧/尺寸估算口径）+ P2×16（字节封顶/解压炸弹/原子合并/手势门控/看门狗/CVE 依赖 scrypt 等）+ P3×8，两项有意不做（useWorkingSet/BottomDock context，decisions.md）。
+  - **性能**：编辑器渲染热点全收口（sharpen scratch/预览直写主画布/笔画 O(1)/水印图章 O(1)）+ vendor 拆分（回访部署 -55% 传输）。
+  - **资产上云**：三模型资产归档 MangoDrive `/OneImage/models/`（SHA-256 全字节验证）；pxed 保留运行时三件套 97MB + fp32 升级路径（400MB，>100MB 过不了 CF 限制且 mesh 不可达——定案留 pxed）；Temp 不留副本。
+  - **流程教训**：squash 合并后必须 git diff 核对 main 树；cherry-pick 冲突中断留空分支；job 级 concurrency 缩进错位=幽灵 job；分支名 typo 导致 PR head 指错；PR amend 前确认未被合并。
+  - **文档**：vault §16.50–16.63 全链沉淀 + README 双引擎说明。
