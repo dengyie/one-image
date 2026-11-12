@@ -174,17 +174,19 @@ async function main(): Promise<void> {
   // doomed retries push the host over and collateral-kill the other's child.
   const prewarmPolicy = (process.env.ONEIMAGE_INPAINT_PREWARM ?? 'both').split(',').map((v) => v.trim())
   const log = (fields: Record<string, unknown>, msg: string): void => app.log.info(fields, msg)
+  // Boot cycle: three fast attempts (~3 min with escalation) covering
+  // transient storms. If still cold, the maintenance loop takes the cadence
+  // (one attempt per 15 min) — the escalated-backoff tail of a 6-attempt
+  // cycle would otherwise sit in a 40-minute silent gap before maintenance
+  // could start.
   if (lamaModelPath && (prewarmPolicy.includes('both') || prewarmPolicy.includes('lama'))) {
-    void prewarmLama({ modelPath: lamaModelPath }).then((warmed) => {
+    void prewarmLama({ modelPath: lamaModelPath }, 3).then((warmed) => {
       app.log.info({ warmed }, 'lama prewarm finished')
-      // The boot cycle covers transient storms; after it gives up, a gentle
-      // maintenance loop keeps trying so a later calm window still lights
-      // the tier up without any user interaction.
       if (!warmed) maintainInpaintWarm({ modelPath: lamaModelPath, kind: 'lama' }, { log })
     })
   }
   if (miganModelPath && (prewarmPolicy.includes('both') || prewarmPolicy.includes('migan'))) {
-    void prewarmMigan({ modelPath: miganModelPath }).then((warmed) => {
+    void prewarmMigan({ modelPath: miganModelPath }, 3).then((warmed) => {
       app.log.info({ warmed }, 'migan prewarm finished')
       if (!warmed) maintainInpaintWarm({ modelPath: miganModelPath, kind: 'migan' }, { log })
     })
