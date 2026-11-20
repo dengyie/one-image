@@ -7,7 +7,7 @@
 ## Next
 
 - [x] Provider policy documented (2026-11-13, vault §16.64): grok/gemini/gpt-image-1 retention + training (paid APIs do not train; 30-55d abuse retention); quota/timeout/error already in config+routes. Provider selection itself was done earlier (grok default, §16.32/16.45).
-- [ ] Add a provider contract test using a sandbox or deterministic fixture before enabling production traffic.
+- [x] Provider contract tests with deterministic fixtures (2026-11-21, PR #66, `344eb38`): gemini dialect (9 cases: /v1beta mount, inlineData edits, gateway unwrapping, 4xx→502 normalization, 429 passthrough, fan-out accounting) + openai-images generations (8 cases: b64/url entries, revised_prompt, n truncation/failed, zero-fetch gates). 493 tests total. No sandbox needed — offline fixtures pin the full request/response contract.
 
 ## Manual-required
 
