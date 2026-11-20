@@ -20,6 +20,7 @@ import {
   type ReferenceImage,
   type ReferenceSource,
 } from '../../application/imagegen-input'
+import { GenerationStages, GenerationPreview } from './GenerationStages'
 
 /** What the App needs to report honestly once a batch comes back. */
 export interface ImageGenOutcome {
@@ -463,6 +464,12 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
               <div className="text-xs text-rose-300 bg-rose-950/60 border border-rose-500/30 rounded-lg p-2.5">{error}</div>
             )}
 
+            {loading && (
+              <GenerationPreview size={size || undefined}>
+                <GenerationStages timeoutMs={modelInfo.timeoutMs || provider.timeoutMs} count={count} />
+              </GenerationPreview>
+            )}
+
             <button
               onClick={() => void handleGenerate()}
               disabled={loading || !prompt.trim()}
@@ -471,7 +478,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
               {loading ? (
                 <>
                   <UiIcon name="loader" className="w-4 h-4 animate-spin" />
-                  {count > 1 ? '生成中，多张会并行请求，通常 30-90 秒…' : '生成中，通常 30-90 秒…'}
+                  生成中…
                 </>
               ) : (
                 <>
