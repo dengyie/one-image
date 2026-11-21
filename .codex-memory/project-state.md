@@ -11,16 +11,19 @@ Image generation surfaces are the active iteration front: staged wait experience
 prop, never inferred from an absent size), timeout refund with honest ledger semantics (PR #68),
 video timeout retry UX (PR #70 — generateVideo surfaces timedOut; the modal shows the billing note
 and a retry button), the elapsed-time echo into the completion toast (PR #71 — the route
-returns elapsedMs, the toast appends a humanized 耗时 segment), and the reference-picker
+returns elapsedMs, the toast appends a humanized 耗时 segment), the reference-picker
 disabled state (PR #72 — edit=false models render a dimmed reference section naming the
-edit-capable models instead of silently hiding it). SSRF host-guard hardening + auth
-session contract tests (`a04b533`). 573 tests green.
+edit-capable models instead of silently hiding it), and the generation sign-in gate (PR #73 —
+imagegen/videogen/caption answer anonymous calls with 401 auth_required before the rate limiter
+and ledger; both modals hand off to the login modal via onNeedAuth; capabilities/quota stay
+public). SSRF host-guard hardening + auth session contract tests (`a04b533`). 575 tests green.
 
 ## Current Branch
 
-`main` is at PR #72's squash (`4a020ff`), deployed to pxed (CI run `44956504687` — verify/package/
-deploy-pxed all green in one pass). Public healthz 200; online browser check confirms the
-reference-picker disabled note on grok-imagine-image-2.0 and normal state after switching back.
+`main` is at PR #73's squash (`43db388`), deployed to pxed (CI run `44961953439` — verify/package/
+deploy-pxed all green in one pass). Online: anonymous imagegen/videogen POST return 401
+auth_required, capabilities/quota/healthz stay 200; browser-verified that the anonymous generate
+flow opens the login modal.
 
 ## Last Verified
 
