@@ -1801,12 +1801,13 @@ export function App() {
               showToast(describeImageGenOutcome(outcome, files.length), outcome.failed > 0 ? 'info' : 'success')
             })()
           }}
+          onNeedAuth={() => setShowAuthModal(true)}
         />
       </LazyMount>
 
       {/* AI Video Generation Modal: results play in place, never in the workspace */}
       <LazyMount open={showVideoGenModal}>
-        <VideoGenModal isOpen={showVideoGenModal} onClose={() => setShowVideoGenModal(false)} />
+        <VideoGenModal isOpen={showVideoGenModal} onClose={() => setShowVideoGenModal(false)} onNeedAuth={() => setShowAuthModal(true)} />
       </LazyMount>
 
       {/* Auth Modal (Login / Register) */}

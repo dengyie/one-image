@@ -49,6 +49,8 @@ interface ImageGenModalProps {
    * pixel-level watermark this route exists to escape.
    */
   initialPrompt?: { prompt: string; nonce: number } | null
+  /** Generation returned 401 auth_required: the App opens the login modal. */
+  onNeedAuth?: () => void
 }
 
 const referenceLimitMb = Math.round(REFERENCE_MAX_BYTES / 1024 / 1024)
@@ -60,6 +62,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   currentImage,
   getCurrentReference,
   initialPrompt,
+  onNeedAuth,
 }) => {
   const [caps, setCaps] = useState<ImagegenCapabilities | null>(null)
   const [capsLoaded, setCapsLoaded] = useState(false)
@@ -246,6 +249,13 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
     setLoading(false)
     refreshQuota()
     if (!result.ok || !result.data) {
+      // Anonymous visitors hit the server's sign-in gate: hand off to the App
+      // so the login modal opens instead of showing a dead-end error.
+      if (result.needsAuth) {
+        onClose()
+        onNeedAuth?.()
+        return
+      }
       setError(result.message ?? '生成失败，请稍后重试')
       setLastTimedOut(result.timedOut === true)
       return

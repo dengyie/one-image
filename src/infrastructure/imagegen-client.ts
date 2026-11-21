@@ -227,7 +227,7 @@ export interface GenerateImageOptions {
 export async function generateImage(
   params: GenerateImageParams,
   options: GenerateImageOptions = {},
-): Promise<{ ok: boolean; data?: ImagegenResponse; message?: string; timedOut?: boolean }> {
+): Promise<{ ok: boolean; data?: ImagegenResponse; message?: string; timedOut?: boolean; needsAuth?: boolean }> {
   // Without a client-side deadline the request would hang for as long as the
   // edge keeps it open (~100s), so the spinner could outlive the server's own
   // give-up point. The signal is combined with any caller one.
@@ -249,6 +249,11 @@ export async function generateImage(
       // client-side deadline case is equally refundable (the server aborts at
       // its own earlier budget and takes the same refund path).
       const timedOut = res.status === 504 || data?.error === 'upstream_timeout'
+      // 401 auth_required: the modal opens the login surface instead of
+      // showing a dead-end error.
+      if (res.status === 401 || data?.error === 'auth_required') {
+        return { ok: false, message: data?.message || '请先登录后再生成', needsAuth: true }
+      }
       return { ok: false, message: data?.message || `生成失败（HTTP ${res.status}）`, timedOut }
     }
     return { ok: true, data: data as ImagegenResponse }
@@ -277,7 +282,7 @@ export interface VideoResult {
 export async function generateVideo(
   params: GenerateVideoParams,
   options: GenerateImageOptions = {},
-): Promise<{ ok: boolean; data?: VideoResult; message?: string; timedOut?: boolean }> {
+): Promise<{ ok: boolean; data?: VideoResult; message?: string; timedOut?: boolean; needsAuth?: boolean }> {
   const signals = [options.signal, typeof params.timeoutMs === 'number' ? AbortSignal.timeout(params.timeoutMs) : undefined]
     .filter((s): s is AbortSignal => !!s)
   const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
@@ -297,6 +302,9 @@ export async function generateVideo(
       // UI reads this to offer a retry with the refund note, mirroring the
       // image surface.
       const timedOut = res.status === 504 || data?.error === 'upstream_timeout'
+      if (res.status === 401 || data?.error === 'auth_required') {
+        return { ok: false, message: data?.message || '请先登录后再生成', needsAuth: true }
+      }
       return { ok: false, message: data?.message || `视频生成失败（HTTP ${res.status}）`, timedOut }
     }
     const blob = await res.blob()
@@ -340,7 +348,7 @@ export interface CaptionImageParams {
 export async function captionImage(
   params: CaptionImageParams,
   options: GenerateImageOptions = {},
-): Promise<{ ok: boolean; data?: { provider: string; model: string; caption: string }; message?: string }> {
+): Promise<{ ok: boolean; data?: { provider: string; model: string; caption: string }; message?: string; needsAuth?: boolean }> {
   const signals = [options.signal, typeof params.timeoutMs === 'number' ? AbortSignal.timeout(params.timeoutMs) : undefined]
     .filter((s): s is AbortSignal => !!s)
   const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
@@ -354,6 +362,9 @@ export async function captionImage(
     })
     const data = await res.json().catch(() => null)
     if (!res.ok) {
+      if (res.status === 401 || data?.error === 'auth_required') {
+        return { ok: false, message: data?.message || '请先登录后再生成', needsAuth: true }
+      }
       return { ok: false, message: data?.message || `图片描述失败（HTTP ${res.status}）` }
     }
     return { ok: true, data: data as { provider: string; model: string; caption: string } }

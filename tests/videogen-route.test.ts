@@ -4,6 +4,7 @@ import { initDatabase } from '../server/db'
 import { registerVideogenRoutes } from '../server/videogen-route'
 import { createRateLimiter } from '../server/rate-limit'
 import type { ImagegenProviderConfig, ImagegenModelSpec } from '../server/imagegen-config'
+import { authedCookieHeader } from './helpers'
 
 // A minimal mp4: the ftyp box at offset 4 is what the mime sniffing keys on.
 const MP4_BYTES = Buffer.concat([Buffer.from([0x00, 0x00, 0x00, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(24, 7)])
@@ -39,7 +40,7 @@ function provider(overrides: Partial<ImagegenProviderConfig> = {}, specs: Imageg
 
 function createApp(
   providers: ImagegenProviderConfig[],
-  options: { dailyCap?: number; rateLimiter?: ReturnType<typeof createRateLimiter>; fetchImpl?: typeof fetch } = {}
+  options: { dailyCap?: number; rateLimiter?: ReturnType<typeof createRateLimiter>; fetchImpl?: typeof fetch; anonymous?: boolean } = {}
 ) {
   const app = Fastify()
   const appDb = initDatabase(':memory:')
@@ -49,6 +50,15 @@ function createApp(
     dailyCap: options.dailyCap ?? 2,
     fetchImpl: options.fetchImpl,
   })
+  // The video endpoint requires a signed-in session; tests default to a
+  // logged-in user (`anonymous: true` opts out to exercise the 401 gate).
+  if (!options.anonymous) {
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
+  }
   return { app, appDb }
 }
 
@@ -69,6 +79,22 @@ function upstreamFetch(): typeof fetch {
 }
 
 describe('videogen routes', () => {
+  it('requires a signed-in session and never touches the upstream or ledger when anonymous', async () => {
+    const fetchImpl = upstreamFetch()
+    const { app, appDb } = createApp([provider()], { anonymous: true, fetchImpl })
+    const res = await app.inject({ method: 'POST', url: '/api/v1/videogen', payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })
+    expect(res.statusCode).toBe(401)
+    const body = JSON.parse(res.body)
+    expect(body.error).toBe('auth_required')
+    expect(body.message).toContain('登录')
+    expect((fetchImpl as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0)
+    expect(appDb.db.prepare('SELECT count FROM videogen_usage').all()).toHaveLength(0)
+
+    // The quota read stays public.
+    const quota = await app.inject({ method: 'GET', url: '/api/v1/videogen/quota' })
+    expect(quota.statusCode).toBe(200)
+  })
+
   it('reports unconfigured as 503 when no provider declares video models', async () => {
     const { app } = createApp([provider({}, [])])
     const res = await app.inject({ method: 'POST', url: '/api/v1/videogen', payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })

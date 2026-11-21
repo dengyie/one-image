@@ -12,6 +12,8 @@ import { GenerationPreview, GenerationStages, VIDEO_STAGES } from './GenerationS
 interface VideoGenModalProps {
   isOpen: boolean
   onClose: () => void
+  /** Generation returned 401 auth_required: the App opens the login modal. */
+  onNeedAuth?: () => void
 }
 
 /**
@@ -19,7 +21,7 @@ interface VideoGenModalProps {
  * editor is a bitmap pipeline); the result plays in place with a download
  * button, one clip per request.
  */
-export const VideoGenModal: React.FC<VideoGenModalProps> = ({ isOpen, onClose }) => {
+export const VideoGenModal: React.FC<VideoGenModalProps> = ({ isOpen, onClose, onNeedAuth }) => {
   const [providers, setProviders] = useState<VideogenProviderInfo[]>([])
   const [loaded, setLoaded] = useState(false)
   const [providerId, setProviderId] = useState('')
@@ -111,6 +113,13 @@ export const VideoGenModal: React.FC<VideoGenModalProps> = ({ isOpen, onClose })
     setLoading(false)
     refreshQuota()
     if (!res.ok || !res.data) {
+      // Anonymous visitors hit the server's sign-in gate: hand off to the App
+      // so the login modal opens instead of showing a dead-end error.
+      if (res.needsAuth) {
+        onClose()
+        onNeedAuth?.()
+        return
+      }
       setError(res.message ?? '视频生成失败，请稍后重试')
       setLastTimedOut(res.timedOut === true)
       return

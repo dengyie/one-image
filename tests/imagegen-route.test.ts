@@ -5,7 +5,7 @@ import { initDatabase } from '../server/db'
 import { registerImagegenRoutes } from '../server/imagegen-route'
 import { createRateLimiter } from '../server/rate-limit'
 import type { ImagegenModelSpec, ImagegenProviderConfig } from '../server/imagegen-config'
-import { withModelSpecs } from './helpers'
+import { withModelSpecs, authedCookieHeader } from './helpers'
 
 function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProviderConfig {
   return withModelSpecs({
@@ -22,7 +22,7 @@ function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProv
 
 function createApp(
   providers: ImagegenProviderConfig[],
-  options: { dailyCap?: number; rateLimiter?: ReturnType<typeof createRateLimiter>; fetchImpl?: typeof fetch; bodyLimit?: number } = {}
+  options: { dailyCap?: number; rateLimiter?: ReturnType<typeof createRateLimiter>; fetchImpl?: typeof fetch; bodyLimit?: number; anonymous?: boolean } = {}
 ) {
   const app = Fastify(options.bodyLimit ? { bodyLimit: options.bodyLimit } : {})
   const appDb = initDatabase(':memory:')
@@ -32,6 +32,15 @@ function createApp(
     dailyCap: options.dailyCap ?? 3,
     fetchImpl: options.fetchImpl,
   })
+  // Generation endpoints require a signed-in session; tests default to a
+  // logged-in user (`anonymous: true` opts out to exercise the 401 gate).
+  if (!options.anonymous) {
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
+  }
   return { app, appDb }
 }
 
@@ -51,6 +60,9 @@ function png(width: number, height: number): Buffer {
 }
 
 const reference = () => png(512, 512).toString('base64')
+
+// Upstream must never be reached when the auth gate fires.
+const failingFetch = () => vi.fn(async () => { throw new Error('upstream must not be called') })
 
 describe('imagegen routes', () => {
   it('reports unconfigured as 503 and never leaks keys in capabilities', async () => {
@@ -84,6 +96,30 @@ describe('imagegen routes', () => {
     expect(caps.body).not.toContain('upstream.example')
     appDb.close()
     appDb2.close()
+  })
+
+  it('requires a signed-in session on the spending endpoints and stays public on reads', async () => {
+    const { app } = createApp([provider()], { anonymous: true, fetchImpl: failingFetch() })
+    const gen = await app.inject({ method: 'POST', url: '/api/v1/imagegen', payload: { provider: 'test', model: 'img-model-1', prompt: 'p' } })
+    expect(gen.statusCode).toBe(401)
+    const body = JSON.parse(gen.body)
+    expect(body.error).toBe('auth_required')
+    // The machine-readable error is what the client turns into the login modal.
+    expect(body.message).toContain('登录')
+
+    // Caption spends upstream money too: anonymous caption on a provider that
+    // declares a caption model is also gated.
+    const captionProvider = provider({ captionModel: 'img-model-1' })
+    const { app: app2 } = createApp([captionProvider], { anonymous: true, fetchImpl: failingFetch() })
+    const caption = await app2.inject({ method: 'POST', url: '/api/v1/imagegen/caption', payload: { mimeType: 'image/png', base64: reference() } })
+    expect(caption.statusCode).toBe(401)
+    expect(JSON.parse(caption.body).error).toBe('auth_required')
+
+    // Reads stay public: the empty-state picker needs capabilities and quota.
+    const caps = await app.inject({ method: 'GET', url: '/api/v1/imagegen/capabilities' })
+    expect(caps.statusCode).toBe(200)
+    const quota = await app.inject({ method: 'GET', url: '/api/v1/imagegen/quota' })
+    expect(quota.statusCode).toBe(200)
   })
 
   it('validates the request contract before spending money', async () => {
@@ -190,6 +226,11 @@ describe('imagegen routes', () => {
     })
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
     registerImagegenRoutes(app, appDb.db, {
       providers: [provider()],
       dailyCap: 50,
@@ -229,6 +270,11 @@ describe('imagegen routes', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: oversized }] }), { status: 200 }))
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
     registerImagegenRoutes(app, appDb.db, { providers: [provider()], dailyCap: 50, fetchImpl: fetchImpl as unknown as typeof fetch })
     const res = await app.inject({
       method: 'POST',
@@ -245,6 +291,11 @@ describe('imagegen routes', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { message: 'Incorrect API key' } }), { status: 401 }))
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
     registerImagegenRoutes(app, appDb.db, { providers: [provider()], dailyCap: 3, fetchImpl: fetchImpl as unknown as typeof fetch })
     const res = await app.inject({
       method: 'POST',
@@ -263,6 +314,11 @@ describe('imagegen routes', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { message: 'boom' } }), { status: 500 }))
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
     registerImagegenRoutes(app, appDb.db, { providers: [provider()], dailyCap: 2, fetchImpl: fetchImpl as unknown as typeof fetch })
     const headers = { 'cf-connecting-ip': '203.0.113.5' }
     for (let i = 0; i < 2; i++) {
@@ -342,6 +398,11 @@ describe('imagegen routes', () => {
     const fetchImpl = vi.fn()
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
     registerImagegenRoutes(app, appDb.db, {
       providers: [provider()],
       dailyCap: 100,
@@ -484,6 +545,11 @@ describe('imagegen routes', () => {
     })
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
     registerImagegenRoutes(app, appDb.db, {
       providers: [provider({
         id: 'google',
@@ -522,6 +588,11 @@ describe('imagegen routes', () => {
       }), { status: 200 }))
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
     registerImagegenRoutes(app, appDb.db, {
       // One gateway provider whose baseUrl carries the OpenAI-style /v1 the
       // image dialects need; the gemini model must not inherit that suffix.
@@ -702,6 +773,11 @@ describe('imagegen url host guard (IPv6 and false positives)', () => {
     })
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
     registerImagegenRoutes(app, appDb.db, {
       providers: [provider({ baseUrl: 'https://fcdn.example/v1' })],
       dailyCap: 50,
