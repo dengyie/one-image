@@ -280,6 +280,61 @@ describe('imagegen routes', () => {
     appDb.close()
   })
 
+  it('refunds the whole charge when the upstream times out', async () => {
+    // The route classifies by err.name, so a fetch that throws TimeoutError
+    // directly exercises the exact production failure mode without waiting
+    // out a real AbortSignal.timeout budget.
+    const fetchImpl = vi.fn().mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+    const { app, appDb } = createApp([provider()], { dailyCap: 3, fetchImpl: fetchImpl as unknown as typeof fetch })
+    const headers = { 'cf-connecting-ip': '203.0.113.8' }
+    const res = await app.inject({ method: 'POST', url: '/api/v1/imagegen', headers, payload: { provider: 'test', model: 'img-model-1', prompt: 'p' } })
+    expect(res.statusCode).toBe(504)
+    expect(JSON.parse(res.body).error).toBe('upstream_timeout')
+    expect(JSON.parse(res.body).message).toContain('已退还')
+    // The pre-charge was fully refunded — the ledger is empty again.
+    const rows = appDb.db.prepare('SELECT count FROM imagegen_usage').all() as unknown as { count: number }[]
+    expect(rows.reduce((acc, r) => acc + r.count, 0)).toBe(0)
+    // And the refunded budget is immediately usable again.
+    const after = appDb.db.prepare('SELECT count FROM imagegen_usage WHERE client_key = ?').all('203.0.113.8') as unknown as { count: number }[]
+    expect(after.reduce((acc, r) => acc + r.count, 0)).toBe(0)
+    appDb.close()
+  })
+
+  it('keeps the charge on non-timeout upstream failures', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response('boom', { status: 500 }))
+    const { app, appDb } = createApp([provider()], { dailyCap: 3, fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await app.inject({ method: 'POST', url: '/api/v1/imagegen', headers: { 'cf-connecting-ip': '203.0.113.9' }, payload: { provider: 'test', model: 'img-model-1', prompt: 'p' } })
+    expect(res.statusCode).toBe(502)
+    const rows = appDb.db.prepare('SELECT count FROM imagegen_usage').all() as unknown as { count: number }[]
+    expect(rows.reduce((acc, r) => acc + r.count, 0)).toBe(1)
+    appDb.close()
+  })
+
+  it('does not refund a partial fan-out that returned some images', async () => {
+    // The gemini dialect fans out per image, so one leg can fail while the
+    // other delivers — that partial success must keep both charges.
+    const real = png(64, 64).toString('base64')
+    let call = 0
+    const fetchImpl = vi.fn().mockImplementation(async () => {
+      call += 1
+      if (call === 1) return new Response('boom', { status: 500 })
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: real } }] } }] }), { status: 200 })
+    })
+    const { app, appDb } = createApp(
+      [provider({ id: 'google', type: 'gemini', baseUrl: 'https://generativelanguage.example', models: ['gemini-2.5-flash-image'] })],
+      { dailyCap: 10, fetchImpl: fetchImpl as unknown as typeof fetch }
+    )
+    const res = await app.inject({ method: 'POST', url: '/api/v1/imagegen', payload: { provider: 'google', model: 'gemini-2.5-flash-image', prompt: 'p', n: 2 } })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.images).toHaveLength(1)
+    expect(body.failed).toBe(1)
+    // Both charges stand — one delivered image plus the failed fan-out leg.
+    const rows = appDb.db.prepare('SELECT count FROM imagegen_usage').all() as unknown as { count: number }[]
+    expect(rows.reduce((acc, r) => acc + r.count, 0)).toBe(2)
+    appDb.close()
+  })
+
   it('rejects rate-limited clients before the upstream call', async () => {
     const fetchImpl = vi.fn()
     const app = Fastify()

@@ -68,6 +68,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   const [prompt, setPrompt] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [lastTimedOut, setLastTimedOut] = useState(false)
   const [revised, setRevised] = useState<string | null>(null)
   const [quota, setQuota] = useState<{ used: number; cap: number; remaining: number } | null>(null)
   // null = a plain text-to-image request, which keeps the outgoing body
@@ -241,8 +242,10 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
     refreshQuota()
     if (!result.ok || !result.data) {
       setError(result.message ?? '生成失败，请稍后重试')
+      setLastTimedOut(result.timedOut === true)
       return
     }
+    setLastTimedOut(false)
     if (result.data.revisedPrompt) setRevised(result.data.revisedPrompt)
     const files = result.data.images.map((image, index) => base64ToFile(image, index))
     if (files.length === 0) {
@@ -461,7 +464,23 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
             )}
 
             {error && (
-              <div className="text-xs text-rose-300 bg-rose-950/60 border border-rose-500/30 rounded-lg p-2.5">{error}</div>
+              <div className="text-xs text-rose-300 bg-rose-950/60 border border-rose-500/30 rounded-lg p-2.5 space-y-2">
+                <p>{error}</p>
+                {lastTimedOut && (
+                  <p className="text-[11px] text-zinc-400">
+                    上游未出图，本次额度已退还；渠道拥堵时换更快的模型（如 gpt-image-1）更容易成功。
+                  </p>
+                )}
+                {lastTimedOut && (
+                  <button
+                    onClick={() => void handleGenerate()}
+                    disabled={loading || !prompt.trim()}
+                    className="px-3 py-1 rounded-lg bg-rose-900/60 hover:bg-rose-800/60 disabled:opacity-50 text-rose-100 text-[11px] font-medium transition-colors"
+                  >
+                    重试
+                  </button>
+                )}
+              </div>
             )}
 
             {loading && (

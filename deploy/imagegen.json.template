@@ -1,6 +1,7 @@
 {
   "providers": [
     {
+      "_README": "baseUrl 有两个候选：公网 https://api.mangoqwq.com/v1（默认，生产在用）；mesh 网关 http://10.144.144.32:3000/v1（2026-11-21 实测 pxed→tebi 不通，切换前必须先验证 mesh 连通性）。mesh-first 历史模板见 imagegen.json.template.bak-20261112-meshfirst。切换 baseUrl 是运维操作：改宿主 /personal/pxed/oneimage/imagegen.json 后 restart，不随 CI 部署。",
       "id": "mangoapi",
       "name": "MangoApi 生图",
       "type": "openai-images",

@@ -4,7 +4,7 @@ import type { ImagegenProviderConfig, ImagegenModelSpec } from './imagegen-confi
 import { captionImage, generateImages, ImagegenUpstreamError, type ImageInput } from './imagegen-providers'
 import { sniffImage } from './image-meta'
 import type { RateLimiter } from './rate-limit'
-import { addUsage, readUsage, resolveUsageClientKey, todayKey } from './usage-ledger'
+import { addUsage, readUsage, resolveUsageClientKey, subUsage, todayKey } from './usage-ledger'
 
 export interface ImagegenRouteOptions {
   providers: ImagegenProviderConfig[]
@@ -280,7 +280,11 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
         })
       }
       if (err instanceof Error && err.name === 'TimeoutError') {
-        return reply.status(504).send({ error: 'upstream_timeout', message: '生成超时，请稍后重试' })
+        // The one refundable failure: a timeout means nothing was delivered
+        // and nothing was consumed downstream, so the whole charge comes back.
+        // Every other failure mode keeps its spend (see usage-ledger.ts).
+        subUsage(db, 'imagegen_usage', clientKey, day, count)
+        return reply.status(504).send({ error: 'upstream_timeout', message: '生成超时，请稍后重试（本次额度已退还）' })
       }
       return reply.status(502).send({ error: 'upstream_error', message: '生成请求失败，请稍后重试' })
     }
@@ -325,6 +329,10 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
         })
       }
       if (err instanceof Error && err.name === 'TimeoutError') {
+        // Deliberately no subUsage refund here, unlike the image surface: a
+        // video job is a long-running single attempt (up to 10 min) whose
+        // upstream may still deliver after the client-side give-up, so the
+        // charge stays — pinned by the videogen-route "still billed" test.
         return reply.status(504).send({ error: 'upstream_timeout', message: '描述超时，请稍后重试' })
       }
       return reply.status(502).send({ error: 'upstream_error', message: '描述请求失败，请稍后重试' })
