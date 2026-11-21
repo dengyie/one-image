@@ -488,26 +488,62 @@ export function onMiganWarmChange(
 }
 
 /**
+ * Escalating spacing for the maintenance loop. After the boot-time prewarm
+ * cycle gives up, keep trying gently forever — but a host that cannot sustain
+ * the warm (the 4GB OOM case) must not be re-bombed every 15 minutes: each
+ * failed attempt spawns a child that loads ORT and dies, collateral-killing
+ * sibling pools and flooding err.log. Consecutive failures widen the interval
+ * from 15 min out to a 4 h cap; any success (or a warm state observed at tick
+ * time) resets the counter, so a calm window still lights the tier up.
+ */
+export function nextInpaintMaintenanceDelayMs(consecutiveFailures: number, baseMs = 15 * 60_000): number {
+  if (consecutiveFailures <= 0) return baseMs
+  // 2× per recorded failure, capped at 16× the base (4 h at the 15 min base).
+  return Math.min(baseMs * 2 ** Math.min(consecutiveFailures, 4), baseMs * 16)
+}
+
+/**
  * After the boot-time prewarm cycle gives up, keep trying gently forever:
  * one single attempt per interval (never concurrent with the initial cycle —
  * maintenance starts only after it finished). On a storm-prone host the warm
  * lands whenever a calm window comes, lighting the tier up with zero user
- * interaction. The timer is unref'd so shutdown never waits on it.
+ * interaction. Failed attempts escalate the interval (see
+ * nextInpaintMaintenanceDelayMs); the timer is unref'd so shutdown never
+ * waits on it.
  */
 export function maintainInpaintWarm(
   options: { modelPath: string; entryPath?: string; kind?: 'lama' | 'migan' },
   hooks: { log: (fields: Record<string, unknown>, msg: string) => void },
   intervalMs = 15 * 60_000,
+  // Injectable pool (tests pass a fake; production resolves the shared pool).
+  poolOverride?: { isWarm: () => boolean; prewarm: (attempts: number, backoffMs: number) => Promise<boolean> },
 ): void {
-  const pool = poolFor(options)
+  const pool = poolOverride ?? poolFor(options)
   const kind = options.kind ?? 'lama'
+  let consecutiveFailures = 0
+  let timer: ReturnType<typeof setInterval> | undefined
+  const schedule = () => {
+    timer = setInterval(tick, nextInpaintMaintenanceDelayMs(consecutiveFailures, intervalMs))
+    timer.unref()
+  }
   const tick = () => {
-    if (pool.isWarm()) return
+    if (pool.isWarm()) {
+      consecutiveFailures = 0
+      return
+    }
     void pool.prewarm(1, 0).then((warmed) => {
-      if (warmed) hooks.log({ modelPath: options.modelPath, kind }, 'inpaint tier warmed by maintenance prewarm')
+      if (warmed) {
+        consecutiveFailures = 0
+        hooks.log({ modelPath: options.modelPath, kind }, 'inpaint tier warmed by maintenance prewarm')
+      } else {
+        consecutiveFailures += 1
+        // Re-arm with the widened interval; the current timer already fired.
+        if (timer) clearInterval(timer)
+        schedule()
+      }
     })
   }
-  setInterval(tick, intervalMs).unref()
+  schedule()
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { LamaProcessPool, type ChildLike, type ForkFn } from '../server/lama-inpaint'
+import { describe, expect, it, vi } from 'vitest'
+import { LamaProcessPool, maintainInpaintWarm, nextInpaintMaintenanceDelayMs, type ChildLike, type ForkFn } from '../server/lama-inpaint'
 
 // Behavior-driven fake child: replies are wired to the messages the pool
 // sends (ping/warm/run), so tests assert observable behavior instead of
@@ -184,6 +184,61 @@ describe('LamaProcessPool lifecycle', () => {
     await expect(pool.prewarm(1, 1)).resolves.toBe(true)
     expect(pool.isWarm()).toBe(true)
     expect(flips).toEqual([true])
+  })
+})
+
+describe('inpaint maintenance backoff', () => {
+  it('escapes the base interval on consecutive failures and caps at 16×', () => {
+    const base = 15 * 60_000
+    expect(nextInpaintMaintenanceDelayMs(0, base)).toBe(base)
+    expect(nextInpaintMaintenanceDelayMs(1, base)).toBe(2 * base)
+    expect(nextInpaintMaintenanceDelayMs(2, base)).toBe(4 * base)
+    expect(nextInpaintMaintenanceDelayMs(3, base)).toBe(8 * base)
+    expect(nextInpaintMaintenanceDelayMs(4, base)).toBe(16 * base)
+    // Clamped — a long storm never grows past 16× the base (4h).
+    expect(nextInpaintMaintenanceDelayMs(9, base)).toBe(16 * base)
+    expect(nextInpaintMaintenanceDelayMs(50, base)).toBe(16 * base)
+  })
+
+  it('widens the re-arm interval after each failed attempt and resets on warm', async () => {
+    vi.useFakeTimers()
+    try {
+      let warmed = false
+      let attempts = 0
+      const logged: Array<Record<string, unknown>> = []
+      const fakePool = {
+        isWarm: () => warmed,
+        prewarm: async () => {
+          attempts += 1
+          // Fail the first two maintenance attempts, then warm.
+          return warmed = attempts > 2
+        },
+      }
+      maintainInpaintWarm(
+        { modelPath: '/models/lama.onnx', kind: 'lama' },
+        { log: (fields, msg) => logged.push({ ...fields, msg }) },
+        60_000,
+        fakePool,
+      )
+      // Tick 1 at the base interval (60s here): fails → re-arm at 2×.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(attempts).toBe(1)
+      // Ticks now come every 2× — advancing just under that fires nothing.
+      await vi.advanceTimersByTimeAsync(119_999)
+      expect(attempts).toBe(1)
+      // The second failure fires at exactly 3× base cumulative (60 + 120) —
+      // and re-arms at 4×.
+      await vi.advanceTimersByTimeAsync(1)
+      expect(attempts).toBe(2)
+      // The warm lands at the 4× interval: the log line fires and the
+      // counter resets.
+      await vi.advanceTimersByTimeAsync(4 * 60_000)
+      expect(attempts).toBe(3)
+      expect(logged.some((l) => l.msg === 'inpaint tier warmed by maintenance prewarm')).toBe(true)
+      expect(warmed).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

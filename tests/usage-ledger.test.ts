@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { initDatabase } from '../server/db'
-import { addUsage, readUsage, todayKey } from '../server/usage-ledger'
+import { addUsage, readUsage, subUsage, todayKey } from '../server/usage-ledger'
 
 const TABLE = 'imagegen_usage' as const
 const CLIENT = '203.0.113.7'
@@ -39,6 +39,24 @@ describe('usage ledger', () => {
     // A sweep triggered by another client's write must not touch today's row.
     addUsage(db, 'videogen_usage', '198.51.100.2', '2026-11-13', 1)
     expect(readUsage(db, TABLE, CLIENT, '2026-11-13')).toBe(4)
+    db.close()
+  })
+
+  it('refunds are clamped at zero and delete a bucket that lands back at zero', () => {
+    const db = freshDb()
+    // Refunding a client with no row must not create a negative count.
+    subUsage(db, TABLE, '198.51.100.3', '2026-11-13', 2)
+    expect(readUsage(db, TABLE, '198.51.100.3', '2026-11-13')).toBe(0)
+    addUsage(db, TABLE, CLIENT, '2026-11-13', 3)
+    subUsage(db, TABLE, CLIENT, '2026-11-13', 5)
+    expect(readUsage(db, TABLE, CLIENT, '2026-11-13')).toBe(0)
+    subUsage(db, TABLE, CLIENT, '2026-11-13', 1)
+    // Still zero, never negative.
+    expect(readUsage(db, TABLE, CLIENT, '2026-11-13')).toBe(0)
+    // Partial refund leaves the remainder standing.
+    addUsage(db, TABLE, CLIENT, '2026-11-13', 4)
+    subUsage(db, TABLE, CLIENT, '2026-11-13', 1)
+    expect(readUsage(db, TABLE, CLIENT, '2026-11-13')).toBe(3)
     db.close()
   })
 

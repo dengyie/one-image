@@ -225,7 +225,7 @@ export interface GenerateImageOptions {
 export async function generateImage(
   params: GenerateImageParams,
   options: GenerateImageOptions = {},
-): Promise<{ ok: boolean; data?: ImagegenResponse; message?: string }> {
+): Promise<{ ok: boolean; data?: ImagegenResponse; message?: string; timedOut?: boolean }> {
   // Without a client-side deadline the request would hang for as long as the
   // edge keeps it open (~100s), so the spinner could outlive the server's own
   // give-up point. The signal is combined with any caller one.
@@ -243,14 +243,18 @@ export async function generateImage(
     })
     const data = await res.json().catch(() => null)
     if (!res.ok) {
-      return { ok: false, message: data?.message || `生成失败（HTTP ${res.status}）` }
+      // Server 504 (upstream_timeout) also refunds the quota charge; the
+      // client-side deadline case is equally refundable (the server aborts at
+      // its own earlier budget and takes the same refund path).
+      const timedOut = res.status === 504 || data?.error === 'upstream_timeout'
+      return { ok: false, message: data?.message || `生成失败（HTTP ${res.status}）`, timedOut }
     }
     return { ok: true, data: data as ImagegenResponse }
   } catch (err: unknown) {
     if (options.signal?.aborted) return { ok: false, message: '已取消生成' }
     // An aborted fetch rejects with AbortError; a deadline expiry is a TimeoutError.
     const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
-    return { ok: false, message: timedOut ? '生成超时，请稍后重试' : '网络连接失败' }
+    return { ok: false, message: timedOut ? '生成超时，请稍后重试' : '网络连接失败', timedOut }
   }
 }
 

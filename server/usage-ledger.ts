@@ -41,3 +41,17 @@ export function addUsage(db: DatabaseSync, table: 'imagegen_usage' | 'videogen_u
   // Housekeeping: yesterday's buckets are dead weight once the day rolled.
   db.prepare(`DELETE FROM ${table} WHERE day < ?`).run(day)
 }
+
+// The one deliberate exception to "a failed generation still counts": an
+// upstream TIMEOUT means nothing was delivered and nothing was consumed
+// downstream, so the route refunds the whole charge. Every other failure mode
+// (upstream 4xx/5xx, partial fan-outs) keeps its charge — the failure path must
+// stay more expensive than the abuse path. Same read-modify-write atomicity
+// argument as addUsage: no await between the write statements.
+export function subUsage(db: DatabaseSync, table: 'imagegen_usage' | 'videogen_usage' | 'smarterase_usage', clientKey: string, day: string, count: number): void {
+  db.prepare(
+    `INSERT INTO ${table} (client_key, day, count) VALUES (?, ?, 0)
+     ON CONFLICT(client_key, day) DO UPDATE SET count = max(0, count - ?)`
+  ).run(clientKey, day, count)
+  db.prepare(`DELETE FROM ${table} WHERE day < ?`).run(day)
+}
