@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveStage } from '../src/components/imagegen/GenerationStages'
+import { resolveStage, VIDEO_STAGES } from '../src/components/imagegen/GenerationStages'
 
 // The wait-state ladder is pure logic resolved against the model's own
 // upstream budget: the component renders, this suite pins the decisions a
@@ -45,5 +45,21 @@ describe('generation stage ladder', () => {
     const stage = resolveStage(1_000, 0, 1)
     expect(stage.label).toBe('构思画面…') // 1s ≥ 0.18 × 5s
     expect(stage.overBudget).toBe(false) // 1s < 1.1 × 5s
+  })
+
+  it('walks the video ladder on the same fractions for a 95s clip', () => {
+    const budget = 95_000
+    expect(resolveStage(0, budget, 1, VIDEO_STAGES.map((s) => ({ ...s, label: () => s.label }))).label).toBe('已提交请求…')
+    expect(resolveStage(budget * 0.2, budget, 1, VIDEO_STAGES.map((s) => ({ ...s, label: () => s.label }))).label).toBe('分镜构思…')
+    expect(resolveStage(budget * 0.5, budget, 1, VIDEO_STAGES.map((s) => ({ ...s, label: () => s.label }))).label).toBe('逐帧渲染…')
+    expect(resolveStage(budget * 0.8, budget, 1, VIDEO_STAGES.map((s) => ({ ...s, label: () => s.label }))).label).toBe('编码输出…')
+  })
+
+  it('holds the last video stage past the cap and never invents a fifth', () => {
+    const ladder = VIDEO_STAGES.map((s) => ({ ...s, label: () => s.label }))
+    const atCap = resolveStage(95_000 * 1.1 + 1, 95_000, 1, ladder)
+    expect(atCap.label).toBe('编码输出…')
+    expect(atCap.overBudget).toBe(true)
+    expect(atCap.progress).toBe(100)
   })
 })

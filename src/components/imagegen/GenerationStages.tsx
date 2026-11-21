@@ -17,6 +17,8 @@ interface GenerationStagesProps {
   timeoutMs: number
   /** Number of images in flight; shown in the stage copy. */
   count: number
+  /** Override the ladder copy — e.g. the video surface's own cadence. */
+  stages?: { at: number; icon: UiIconName; label: string }[]
 }
 
 // Stage copy follows ChatGPT's cadence: short verb phrases, no fake
@@ -29,6 +31,15 @@ const STAGES: { at: number; icon: UiIconName; label: (count: number) => string }
   { at: 0.75, icon: 'image', label: (n) => (n > 1 ? '汇总输出…' : '打磨输出…') },
 ]
 
+// The video cadence: same four-beat rhythm, shot vocabulary instead of a
+// still-image one. `at` fractions are shared with the image ladder.
+export const VIDEO_STAGES: { at: number; icon: UiIconName; label: string }[] = [
+  { at: 0, icon: 'cloud', label: '已提交请求…' },
+  { at: 0.18, icon: 'sparkles', label: '分镜构思…' },
+  { at: 0.45, icon: 'film', label: '逐帧渲染…' },
+  { at: 0.75, icon: 'loader', label: '编码输出…' },
+]
+
 // Long-poll requests behind Cloudflare can stretch well past the nominal
 // budget (upstream 504 wins the race at ~budget+5s client-side). Stages stop
 // advancing at 110% of budget and hold the last one instead of lying.
@@ -39,10 +50,11 @@ export function resolveStage(
   elapsedMs: number,
   timeoutMs: number,
   count: number,
+  stages: { at: number; icon: UiIconName; label: (count: number) => string }[] = STAGES,
 ): { icon: UiIconName; label: string; atMs: number; progress: number; overBudget: boolean } {
   const budget = Math.max(timeoutMs, 5_000)
   const capMs = budget * LADDER_CAP
-  const ladder = STAGES.map((stage) => ({ ...stage, atMs: stage.at * budget }))
+  const ladder = stages.map((stage) => ({ ...stage, atMs: stage.at * budget }))
   const current = ladder.reduce((acc, stage) => (elapsedMs >= stage.atMs ? stage : acc), ladder[0])
   return {
     icon: current.icon,
@@ -53,7 +65,7 @@ export function resolveStage(
   }
 }
 
-export const GenerationStages: React.FC<GenerationStagesProps> = ({ timeoutMs, count }) => {
+export const GenerationStages: React.FC<GenerationStagesProps> = ({ timeoutMs, count, stages }) => {
   const [elapsedMs, setElapsedMs] = useState(0)
   useEffect(() => {
     const started = performance.now()
@@ -63,7 +75,10 @@ export const GenerationStages: React.FC<GenerationStagesProps> = ({ timeoutMs, c
     return () => window.clearInterval(timer)
   }, [])
 
-  const current = resolveStage(elapsedMs, timeoutMs, count)
+  // Custom ladders carry plain strings; wrap them so resolveStage's label
+  // contract stays uniform.
+  const ladder = stages?.map((stage) => ({ ...stage, label: () => stage.label }))
+  const current = resolveStage(elapsedMs, timeoutMs, count, ladder)
   const seconds = Math.floor(elapsedMs / 1000)
 
   return (
@@ -94,6 +109,13 @@ export const GenerationStages: React.FC<GenerationStagesProps> = ({ timeoutMs, c
 interface GenerationPreviewProps {
   /** Aspect ratio hint from the requested size, e.g. "1536x1024". */
   size?: string
+  /**
+   * Frame proportion when no size hint exists: the video surface has no
+   * size picker so its preview reads as a 16:9 clip frame; the image surface
+   * keeps the square canvas default. Explicit, not inferred from `size` —
+   * an image model left on "模型默认" must not inherit the video frame.
+   */
+  video?: boolean
   /** The child in the middle of the shimmer frame (spinner/ladder). */
   children?: React.ReactNode
 }
@@ -113,8 +135,8 @@ function aspectOf(size?: string): string | undefined {
  * surface sweeps light while the request is in flight. Replaces the bare
  * spinner-in-a-button with something that reads as "a picture is coming".
  */
-export const GenerationPreview: React.FC<GenerationPreviewProps> = ({ size, children }) => {
-  const aspect = aspectOf(size)
+export const GenerationPreview: React.FC<GenerationPreviewProps> = ({ size, video, children }) => {
+  const aspect = aspectOf(size) ?? (video ? '16 / 9' : undefined)
   return (
     <div
       className="relative w-full max-w-[280px] mx-auto rounded-xl border border-zinc-700/80 bg-zinc-800/40 overflow-hidden"
