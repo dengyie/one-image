@@ -123,6 +123,12 @@ export function isPrivateHost(hostname: string): boolean {
   if (host === '0.0.0.0') return true
   const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
   if (v4) return isPrivateV4Octets(Number(v4[1]), Number(v4[2]))
+  // Kubernetes cluster-internal names and mDNS — unresolvable on the public
+  // internet, so a public upstream has no legitimate reason to return them.
+  if (host.endsWith('.svc') || host.endsWith('.cluster.local') || host.endsWith('.local')) return true
+  // A dot-less single-label name has no TLD and can only resolve through the
+  // server's own DNS search suffix — i.e. into the intranet.
+  if (!host.includes('.')) return true
   return false
 }
 
