@@ -85,6 +85,8 @@ export interface ImagegenResponse {
   requestedSize?: string
   /** Requested images the upstream did not produce (they still counted against the cap). */
   failed?: number
+  /** Wall-clock of the upstream call, for the result card's meta row. */
+  elapsedMs?: number
 }
 
 /** Not every capabilities payload needs `failed` (older shapes omit it). */

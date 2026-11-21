@@ -109,6 +109,12 @@ function describeImageGenOutcome(outcome: ImageGenOutcome, count: number): strin
   const first = outcome.images[0]
   const pixels = first?.width && first?.height ? `${first.width}×${first.height}` : '尺寸未知'
   const parts = [`AI 生成完成（${outcome.model}）：${pixels}`]
+  // The wait ladder shows elapsed time live; echoing it here keeps the
+  // "how long did this one take" answer after the image lands.
+  if (outcome.elapsedMs && outcome.elapsedMs > 0) {
+    const s = outcome.elapsedMs / 1000
+    parts.push(`耗时 ${s >= 60 ? `${Math.floor(s / 60)}m${Math.round(s % 60)}s` : `${s.toFixed(1)}s`}`)
+  }
   parts.push(count > 1 ? `共 ${count} 张，当前显示最后一张` : '已进入工作台')
   if (outcome.failed > 0) parts.push(`${outcome.failed} 张失败`)
   const requested = /^(\d+)x(\d+)$/i.exec(outcome.requestedSize ?? '')
