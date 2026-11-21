@@ -153,6 +153,9 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   const sizes = modelInfo?.sizes ?? provider?.sizes ?? []
   const fixedSizeNote = modelInfo ? modelInfo.fixedSizeNote : (provider?.fixedSizeNote ?? null)
   const modelGroups = provider ? groupImagegenModels(provider.modelInfos) : []
+  // Disabled-state hint: name the models that DO accept a reference so the
+  // user knows where to switch instead of guessing.
+  const editModels = provider?.modelInfos.filter((m) => m.edit).map((m) => m.id) ?? []
 
   const switchProvider = (id: string) => {
     const next = caps?.providers.find((p) => p.id === id)
@@ -324,8 +327,10 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
 
             {(modelInfo.note || supportsEdit) && (
               <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                {supportsEdit && (
+                {supportsEdit ? (
                   <span className="rounded-full bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-emerald-300">支持参考图</span>
+                ) : (
+                  <span className="rounded-full bg-zinc-800 border border-zinc-700 px-2 py-0.5 text-zinc-500">不支持参考图</span>
                 )}
                 {sizes.length > 0 && (
                   <span className="rounded-full bg-zinc-800 border border-zinc-700 px-2 py-0.5 text-zinc-400">尺寸可选</span>
@@ -376,72 +381,92 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
               </label>
             </div>
 
-            {supportsEdit && (
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-400">参考图</span>
-                  {reference && (
-                    <button onClick={() => setReference(null)} className="text-[11px] text-zinc-500 hover:text-zinc-200 transition-colors">
-                      移除
-                    </button>
-                  )}
-                </div>
-                <div
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    e.preventDefault()
-                    useFile(e.dataTransfer.files?.[0])
-                  }}
-                  className="rounded-xl border border-dashed border-zinc-700 bg-zinc-800/40 p-3 space-y-2"
-                >
-                  {reference ? (
-                    <div className="flex items-center gap-3">
-                      <img
-                        src={`data:${reference.mimeType};base64,${reference.base64}`}
-                        alt="参考图"
-                        className="w-16 h-16 rounded-lg object-cover bg-zinc-900"
-                      />
-                      <div className="text-[11px] text-zinc-400 leading-relaxed">
-                        {reference.width}×{reference.height} · {Math.max(1, Math.round(reference.bytes / 1024))} KB
-                        <br />
-                        上传前已压到 {REFERENCE_MAX_EDGE}px / {referenceLimitMb}MB 以内
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-zinc-500 leading-relaxed">
-                      拖入一张图作为底图，或直接使用当前画布；会在上传前压到 {REFERENCE_MAX_EDGE}px 以内
-                    </div>
-                  )}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={() => void useCurrentImage()}
-                      disabled={pickingReference || loading}
-                      className="px-2.5 py-1 rounded-lg bg-zinc-700/70 hover:bg-zinc-700 disabled:opacity-50 text-[11px] text-zinc-100 transition-colors"
-                    >
-                      使用当前图片
-                    </button>
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={pickingReference || loading}
-                      className="px-2.5 py-1 rounded-lg bg-zinc-700/70 hover:bg-zinc-700 disabled:opacity-50 text-[11px] text-zinc-100 transition-colors"
-                    >
-                      选择文件
-                    </button>
-                    {pickingReference && <span className="text-[11px] text-zinc-500">处理中…</span>}
-                  </div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    className="hidden"
-                    onChange={(e) => {
-                      useFile(e.target.files?.[0])
-                      e.target.value = ''
-                    }}
-                  />
-                </div>
+            {/* 参考图区块始终渲染：不支持编辑的模型显示禁用态 + 原因说明，
+                而不是整体消失——否则用户切到不支持参考图的模型后发现入口
+                凭空不见，也不知道如何找回（线上实测 2026-11-22）。 */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-zinc-400">参考图</span>
+                {supportsEdit && reference && (
+                  <button onClick={() => setReference(null)} className="text-[11px] text-zinc-500 hover:text-zinc-200 transition-colors">
+                    移除
+                  </button>
+                )}
               </div>
-            )}
+              <div
+                onDragOver={supportsEdit ? (e) => e.preventDefault() : undefined}
+                onDrop={
+                  supportsEdit
+                    ? (e) => {
+                        e.preventDefault()
+                        useFile(e.dataTransfer.files?.[0])
+                      }
+                    : undefined
+                }
+                className={
+                  supportsEdit
+                    ? 'rounded-xl border border-dashed border-zinc-700 bg-zinc-800/40 p-3 space-y-2'
+                    : 'rounded-xl border border-dashed border-zinc-800 bg-zinc-900/40 p-3 opacity-60'
+                }
+              >
+                {!supportsEdit ? (
+                  <div className="text-[11px] text-zinc-500 leading-relaxed">
+                    当前模型不支持参考图（图生图）。
+                    {editModels.length > 0
+                      ? `切换到 ${editModels.join(' / ')} 后可拖入底图。`
+                      : '切换到支持参考图的模型后可拖入底图。'}
+                  </div>
+                ) : (
+                  <>
+                    {reference ? (
+                      <div className="flex items-center gap-3">
+                        <img
+                          src={`data:${reference.mimeType};base64,${reference.base64}`}
+                          alt="参考图"
+                          className="w-16 h-16 rounded-lg object-cover bg-zinc-900"
+                        />
+                        <div className="text-[11px] text-zinc-400 leading-relaxed">
+                          {reference.width}×{reference.height} · {Math.max(1, Math.round(reference.bytes / 1024))} KB
+                          <br />
+                          上传前已压到 {REFERENCE_MAX_EDGE}px / {referenceLimitMb}MB 以内
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-zinc-500 leading-relaxed">
+                        拖入一张图作为底图，或直接使用当前画布；会在上传前压到 {REFERENCE_MAX_EDGE}px 以内
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => void useCurrentImage()}
+                        disabled={pickingReference || loading}
+                        className="px-2.5 py-1 rounded-lg bg-zinc-700/70 hover:bg-zinc-700 disabled:opacity-50 text-[11px] text-zinc-100 transition-colors"
+                      >
+                        使用当前图片
+                      </button>
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={pickingReference || loading}
+                        className="px-2.5 py-1 rounded-lg bg-zinc-700/70 hover:bg-zinc-700 disabled:opacity-50 text-[11px] text-zinc-100 transition-colors"
+                      >
+                        选择文件
+                      </button>
+                      {pickingReference && <span className="text-[11px] text-zinc-500">处理中…</span>}
+                    </div>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      className="hidden"
+                      onChange={(e) => {
+                        useFile(e.target.files?.[0])
+                        e.target.value = ''
+                      }}
+                    />
+                  </>
+                )}
+              </div>
+            </div>
 
             <label className="block space-y-1.5">
               <span className="text-xs text-zinc-400">提示词</span>
