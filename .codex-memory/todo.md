@@ -8,6 +8,7 @@
 
 - [x] Provider policy documented (2026-11-13, vault §16.64): grok/gemini/gpt-image-1 retention + training (paid APIs do not train; 30-55d abuse retention); quota/timeout/error already in config+routes. Provider selection itself was done earlier (grok default, §16.32/16.45).
 - [x] Provider contract tests with deterministic fixtures (2026-11-21, PR #66, `344eb38`): gemini dialect (9 cases: /v1beta mount, inlineData edits, gateway unwrapping, 4xx→502 normalization, 429 passthrough, fan-out accounting) + openai-images generations (8 cases: b64/url entries, revised_prompt, n truncation/failed, zero-fetch gates). 493 tests total. No sandbox needed — offline fixtures pin the full request/response contract.
+- [x] Deep review of the timeout-refund branch (2026-11-21, PR #68, `fe687cf`): subUsage double defect fixed (2 placeholders vs 3 bound params → ERR_SQLITE_ERROR on every refund; `excluded.count` literal-0 made the deduction a no-op); refund semantics verified in isolation (deduct, max(0,·) clamp, unknown-key plants a 0 row). Partial-fan-out billing test moved to the gemini dialect (real per-image fan-out). lama warm maintenance backoff (15min doubling to a 4h cap, reset on success). videogen no-refund timeout pinned as deliberate. 504 tests, live-verified.
 
 ## Manual-required
 
