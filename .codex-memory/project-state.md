@@ -6,15 +6,16 @@ Maintain OneImage as a browser-first image workbench and keep its provenance pat
 
 ## Current Phase
 
-Image generation surfaces are the active iteration front: staged wait experience (PR #67), timeout
-refund with honest ledger semantics (PR #68), SSRF host-guard hardening + auth session contract
-tests (`a04b533`). 568 tests green.
+Image generation surfaces are the active iteration front: staged wait experience for both images
+(PR #67) and video (PR #69 — VIDEO_STAGES ladder + 16:9 shimmer preview with an explicit `video`
+prop, never inferred from an absent size), timeout refund with honest ledger semantics (PR #68),
+SSRF host-guard hardening + auth session contract tests (`a04b533`). 570 tests green.
 
 ## Current Branch
 
-`main` is at `a04b533`, deployed to pxed (CI run `44867922422` verify/package/deploy-pxed all
-green). SSRF private-host guard rejects k8s cluster names, mDNS and dot-less single-label hosts;
-session lifecycle is pinned by direct contract tests (token hashing at rest, expiry purge).
+`main` is at PR #69's squash (`3ba154a` prefix), deployed to pxed (CI run `44869913190` — the first
+attempt stuck 20 min on the pxed upload step and was cancelled; the auto-retry finished in 3m25s).
+Public healthz/capabilities/site all 200.
 
 ## Last Verified
 
