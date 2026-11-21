@@ -27,6 +27,7 @@ export const VideoGenModal: React.FC<VideoGenModalProps> = ({ isOpen, onClose })
   const [prompt, setPrompt] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [lastTimedOut, setLastTimedOut] = useState(false)
   const [result, setResult] = useState<VideoResult | null>(null)
   const [quota, setQuota] = useState<{ used: number; cap: number; remaining: number } | null>(null)
   const resultUrlRef = useRef<string | null>(null)
@@ -111,8 +112,10 @@ export const VideoGenModal: React.FC<VideoGenModalProps> = ({ isOpen, onClose })
     refreshQuota()
     if (!res.ok || !res.data) {
       setError(res.message ?? '视频生成失败，请稍后重试')
+      setLastTimedOut(res.timedOut === true)
       return
     }
+    setLastTimedOut(false)
     resultUrlRef.current = URL.createObjectURL(res.data.blob)
     setResult(res.data)
   }
@@ -191,7 +194,23 @@ export const VideoGenModal: React.FC<VideoGenModalProps> = ({ isOpen, onClose })
             </label>
 
             {error && (
-              <div className="text-xs text-rose-300 bg-rose-950/60 border border-rose-500/30 rounded-lg p-2.5">{error}</div>
+              <div className="text-xs text-rose-300 bg-rose-950/60 border border-rose-500/30 rounded-lg p-2.5 space-y-2">
+                <p>{error}</p>
+                {lastTimedOut && (
+                  <p className="text-[11px] text-zinc-400">
+                    视频计费按既定语义保持（上游可能仍在出片）；渠道拥堵时换更快的模型更容易成功。
+                  </p>
+                )}
+                {lastTimedOut && (
+                  <button
+                    onClick={() => void handleGenerate()}
+                    disabled={loading || !prompt.trim()}
+                    className="px-3 py-1 rounded-lg bg-rose-900/60 hover:bg-rose-800/60 disabled:opacity-50 text-rose-100 text-[11px] font-medium transition-colors"
+                  >
+                    重试
+                  </button>
+                )}
+              </div>
             )}
 
             {loading && (

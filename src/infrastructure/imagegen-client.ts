@@ -275,7 +275,7 @@ export interface VideoResult {
 export async function generateVideo(
   params: GenerateVideoParams,
   options: GenerateImageOptions = {},
-): Promise<{ ok: boolean; data?: VideoResult; message?: string }> {
+): Promise<{ ok: boolean; data?: VideoResult; message?: string; timedOut?: boolean }> {
   const signals = [options.signal, typeof params.timeoutMs === 'number' ? AbortSignal.timeout(params.timeoutMs) : undefined]
     .filter((s): s is AbortSignal => !!s)
   const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
@@ -290,8 +290,12 @@ export async function generateVideo(
     })
     if (!res.ok) {
       // Errors stay JSON even though success is binary.
-      const data = await res.json().catch(() => null) as { message?: string } | null
-      return { ok: false, message: data?.message || `视频生成失败（HTTP ${res.status}）` }
+      const data = await res.json().catch(() => null) as { message?: string; error?: string } | null
+      // The route's 504 is the one failure where nothing was consumed — the
+      // UI reads this to offer a retry with the refund note, mirroring the
+      // image surface.
+      const timedOut = res.status === 504 || data?.error === 'upstream_timeout'
+      return { ok: false, message: data?.message || `视频生成失败（HTTP ${res.status}）`, timedOut }
     }
     const blob = await res.blob()
     if (blob.size === 0) return { ok: false, message: '上游返回了空视频' }
@@ -307,8 +311,8 @@ export async function generateVideo(
     }
   } catch (err: unknown) {
     if (options.signal?.aborted) return { ok: false, message: '已取消生成' }
-    const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
-    return { ok: false, message: timedOut ? '视频生成超时，请稍后重试' : '网络连接失败' }
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    return { ok: false, message: timedOut ? '视频生成超时，请稍后重试' : '网络连接失败', timedOut }
   }
 }
 

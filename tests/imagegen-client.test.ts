@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
+  generateVideo,
   groupImagegenModels,
   imagegenFailedCount,
   resolveImagegenSelection,
@@ -129,5 +130,45 @@ describe('imagegenFailedCount', () => {
     expect(imagegenFailedCount({ provider: 'p', model: 'm', images: [] })).toBe(0)
     expect(imagegenFailedCount({ provider: 'p', model: 'm', images: [], failed: -2 })).toBe(0)
     expect(imagegenFailedCount({ provider: 'p', model: 'm', images: [], failed: 2 })).toBe(2)
+  })
+})
+
+// The video client mirrors the image client's timeout contract: the route's
+// 504 (and its upstream_timeout envelope) is the one failure the UI treats as
+// retryable, so generateVideo must surface it as timedOut.
+describe('generateVideo timeout contract', () => {
+  it('marks a route 504 as timedOut so the UI can offer a retry', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'upstream_timeout', message: '描述超时' }), { status: 504 })))
+    try {
+      const res = await generateVideo({ provider: 'p', model: 'm', prompt: 'p', timeoutMs: 5000 })
+      expect(res.ok).toBe(false)
+      expect(res.timedOut).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('does not mark other upstream failures as timedOut', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ message: '配额不足' }), { status: 429 })))
+    try {
+      const res = await generateVideo({ provider: 'p', model: 'm', prompt: 'p', timeoutMs: 5000 })
+      expect(res.ok).toBe(false)
+      expect(res.timedOut).toBe(false)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('marks a client-side deadline expiry as timedOut, but not a modal-close abort', async () => {
+    // Deadline expiry: the AbortSignal.timeout inside generateVideo fires.
+    vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('deadline', 'TimeoutError')))
+    })))
+    try {
+      const res = await generateVideo({ provider: 'p', model: 'm', prompt: 'p', timeoutMs: 50 })
+      expect(res.timedOut).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
