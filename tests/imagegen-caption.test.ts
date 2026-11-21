@@ -5,6 +5,7 @@ import { registerImagegenRoutes } from '../server/imagegen-route'
 import { createRateLimiter } from '../server/rate-limit'
 import type { ImagegenProviderConfig } from '../server/imagegen-config'
 import { withModelSpecs } from './helpers'
+import { authedCookieHeader } from './helpers'
 
 function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProviderConfig {
   return withModelSpecs({
@@ -22,7 +23,7 @@ function provider(overrides: Partial<ImagegenProviderConfig> = {}): ImagegenProv
 
 function createApp(
   providers: ImagegenProviderConfig[],
-  options: { dailyCap?: number; rateLimiter?: ReturnType<typeof createRateLimiter>; fetchImpl?: typeof fetch } = {}
+  options: { dailyCap?: number; rateLimiter?: ReturnType<typeof createRateLimiter>; fetchImpl?: typeof fetch; anonymous?: boolean } = {}
 ) {
   const app = Fastify()
   const appDb = initDatabase(':memory:')
@@ -32,6 +33,15 @@ function createApp(
     dailyCap: options.dailyCap ?? 3,
     fetchImpl: options.fetchImpl,
   })
+  // Caption spends upstream money too, so the same session gate applies;
+  // tests default to a logged-in user (`anonymous: true` opts out).
+  if (!options.anonymous) {
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      request.headers.cookie = cookie
+      done()
+    })
+  }
   return { app, appDb }
 }
 

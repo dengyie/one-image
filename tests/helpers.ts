@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto'
 import type Fastify from 'fastify'
 import type { DatabaseSync } from 'node:sqlite'
 import type { VerificationMailer } from '../server/onemail'
@@ -82,4 +83,22 @@ export function sessionTokenFrom(res: { cookies: { name: string; value: string }
   const cookie = res.cookies.find((entry) => entry.name === 'oneimage_session')
   if (!cookie) throw new Error('no oneimage_session cookie on response')
   return cookie.value
+}
+
+
+// Creates a signed-in user + session directly in the given SQLite and returns
+// the `Cookie` header value for Fastify.inject() calls. Sessions are stored
+// sha256-hashed (server/auth.ts hashToken), so the insert mirrors that.
+export function authedCookieHeader(db: DatabaseSync): string {
+  const id = `usr_${randomBytes(8).toString('hex')}`
+  const now = Date.now()
+  db.prepare(`
+    INSERT INTO users (id, username, email, password_hash, salt, nickname, avatar_color, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, `authed-${id.slice(4)}`, `${id}@test.com`, 'test-hash', 'test-salt', 'authed', '#10b981', now, now)
+  const token = `sess_${randomBytes(32).toString('hex')}`
+  const expiresAt = now + 30 * 24 * 60 * 60 * 1000
+  db.prepare(`INSERT INTO sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)`)
+    .run(createHash('sha256').update(token).digest('hex'), id, expiresAt, now)
+  return `oneimage_session=${token}`
 }
