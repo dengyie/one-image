@@ -252,12 +252,13 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
       )
       // Latency per request is what tells the operator whether the edge budget
       // is holding; no prompt or key ever goes in here.
+      const elapsedMs = Math.round(performance.now() - startedAt)
       request.log.info({
         provider: provider.id,
         model,
         n: count,
         mode: image ? 'image-to-image' : 'text-to-image',
-        ms: Math.round(performance.now() - startedAt),
+        ms: elapsedMs,
         images: result.images.length,
         failed: result.failed ?? 0,
         sizes: result.images.map((img) => (img.width && img.height ? `${img.width}x${img.height}` : img.mimeType)),
@@ -269,6 +270,10 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
         revisedPrompt: result.revisedPrompt,
         requestedSize: cleanSize,
         failed: result.failed ?? 0,
+        // Wall-clock of the upstream call itself, echoed for the result card:
+        // the wait ladder shows it live, but once the image lands the user
+        // still wants to know how long "this one" took.
+        elapsedMs,
       })
     } catch (err: unknown) {
       request.log.warn({ err }, 'imagegen upstream call failed')

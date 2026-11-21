@@ -125,6 +125,9 @@ describe('imagegen routes', () => {
     expect(body.images[0].mimeType).toBe('image/png')
     expect(body.images[0].base64).toBe(pngBase64)
     expect(body.revisedPrompt).toBe('better prompt')
+    // Wall-clock of the upstream call, echoed for the result meta row.
+    expect(body.elapsedMs).toBeTypeOf('number')
+    expect(body.elapsedMs).toBeGreaterThanOrEqual(0)
 
     const [url, init] = fetchImpl.mock.calls[0]
     expect(String(url)).toBe('https://upstream.example/v1/images/generations')

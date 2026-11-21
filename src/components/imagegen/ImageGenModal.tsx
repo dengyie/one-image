@@ -30,6 +30,8 @@ export interface ImageGenOutcome {
   failed: number
   /** The `size` that was asked for, when one was. */
   requestedSize?: string
+  /** Wall-clock of the upstream call, echoed into the completion toast. */
+  elapsedMs?: number
 }
 
 interface ImageGenModalProps {
@@ -259,6 +261,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
       images: result.data.images,
       failed: imagegenFailedCount(result.data),
       requestedSize: result.data.requestedSize,
+      elapsedMs: result.data.elapsedMs,
     })
   }
 
