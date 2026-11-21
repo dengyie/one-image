@@ -9,9 +9,8 @@ Maintain OneImage as a browser-first image workbench and keep its provenance pat
 Image generation surfaces are the active iteration front: staged wait experience for both images
 (PR #67) and video (PR #69 — VIDEO_STAGES ladder + 16:9 shimmer preview with an explicit `video`
 prop, never inferred from an absent size), timeout refund with honest ledger semantics (PR #68),
-video timeout retry UX (PR #70 — generateVideo surfaces timedOut; the modal shows the billing note
-and a retry button), SSRF host-guard hardening + auth session contract tests (`a04b533`). 573
-tests green.
+video timeout retry UX (PR #70) and elapsed-time echo into the completion toast (PR #71 — generateVideo surfaces timedOut; the modal shows the billing note
+and a retry button), SSRF host-guard hardening + auth session contract tests (`a04b533`). 573 tests green.
 
 ## Current Branch
 
