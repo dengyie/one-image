@@ -10,15 +10,17 @@ Image generation surfaces are the active iteration front: staged wait experience
 (PR #67) and video (PR #69 — VIDEO_STAGES ladder + 16:9 shimmer preview with an explicit `video`
 prop, never inferred from an absent size), timeout refund with honest ledger semantics (PR #68),
 video timeout retry UX (PR #70 — generateVideo surfaces timedOut; the modal shows the billing note
-and a retry button), and the elapsed-time echo into the completion toast (PR #71 — the route
-returns elapsedMs, the toast appends a humanized 耗时 segment). SSRF host-guard hardening + auth
+and a retry button), the elapsed-time echo into the completion toast (PR #71 — the route
+returns elapsedMs, the toast appends a humanized 耗时 segment), and the reference-picker
+disabled state (PR #72 — edit=false models render a dimmed reference section naming the
+edit-capable models instead of silently hiding it). SSRF host-guard hardening + auth
 session contract tests (`a04b533`). 573 tests green.
 
 ## Current Branch
 
-`main` is at PR #71's squash, deployed to pxed (CI run `44898708002` — verify/package/deploy-pxed
-all green in one pass, no upload stall this time). Public healthz/capabilities/site all 200.
-Public healthz/capabilities/site all 200.
+`main` is at PR #72's squash (`4a020ff`), deployed to pxed (CI run `44956504687` — verify/package/
+deploy-pxed all green in one pass). Public healthz 200; online browser check confirms the
+reference-picker disabled note on grok-imagine-image-2.0 and normal state after switching back.
 
 ## Last Verified
 
