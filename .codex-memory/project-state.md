@@ -9,13 +9,15 @@ Maintain OneImage as a browser-first image workbench and keep its provenance pat
 Image generation surfaces are the active iteration front: staged wait experience for both images
 (PR #67) and video (PR #69 — VIDEO_STAGES ladder + 16:9 shimmer preview with an explicit `video`
 prop, never inferred from an absent size), timeout refund with honest ledger semantics (PR #68),
-video timeout retry UX (PR #70) and elapsed-time echo into the completion toast (PR #71 — generateVideo surfaces timedOut; the modal shows the billing note
-and a retry button), SSRF host-guard hardening + auth session contract tests (`a04b533`). 573 tests green.
+video timeout retry UX (PR #70 — generateVideo surfaces timedOut; the modal shows the billing note
+and a retry button), and the elapsed-time echo into the completion toast (PR #71 — the route
+returns elapsedMs, the toast appends a humanized 耗时 segment). SSRF host-guard hardening + auth
+session contract tests (`a04b533`). 573 tests green.
 
 ## Current Branch
 
-`main` is at PR #70's squash, deployed to pxed (CI run `44874232951` — the first deploy attempt
-stuck on the pxed upload step, cancelled per the §16.70 playbook, manual rerun finished green).
+`main` is at PR #71's squash, deployed to pxed (CI run `44898708002` — verify/package/deploy-pxed
+all green in one pass, no upload stall this time). Public healthz/capabilities/site all 200.
 Public healthz/capabilities/site all 200.
 
 ## Last Verified
