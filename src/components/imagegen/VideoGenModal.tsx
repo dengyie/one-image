@@ -7,6 +7,7 @@ import {
   type VideoResult,
   type VideogenProviderInfo,
 } from '../../infrastructure/imagegen-client'
+import { GenerationPreview, GenerationStages, VIDEO_STAGES } from './GenerationStages'
 
 interface VideoGenModalProps {
   isOpen: boolean
@@ -193,6 +194,16 @@ export const VideoGenModal: React.FC<VideoGenModalProps> = ({ isOpen, onClose })
               <div className="text-xs text-rose-300 bg-rose-950/60 border border-rose-500/30 rounded-lg p-2.5">{error}</div>
             )}
 
+            {loading && (
+              <GenerationPreview video>
+                <GenerationStages
+                  timeoutMs={modelInfo?.timeoutMs ?? provider.models[0]?.timeoutMs ?? 90_000}
+                  count={1}
+                  stages={VIDEO_STAGES}
+                />
+              </GenerationPreview>
+            )}
+
             {result && resultUrlRef.current && (
               <div className="space-y-2">
                 <video
@@ -223,7 +234,7 @@ export const VideoGenModal: React.FC<VideoGenModalProps> = ({ isOpen, onClose })
               {loading ? (
                 <>
                   <UiIcon name="loader" className="w-4 h-4 animate-spin" />
-                  视频生成中，通常 {modelInfo?.note ?? '40-90 秒'}…
+                  生成中…
                 </>
               ) : (
                 <>
