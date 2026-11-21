@@ -6,20 +6,25 @@ Maintain OneImage as a browser-first image workbench and keep its provenance pat
 
 ## Current Phase
 
-Provenance target fix deployed and online-verified.
+Image generation surfaces are the active iteration front: staged wait experience (PR #67), timeout
+refund with honest ledger semantics (PR #68), SSRF host-guard hardening + auth session contract
+tests (`a04b533`). 568 tests green.
 
 ## Current Branch
 
-`main` is at `4d631b9`, deployed to pxed. Provenance inspects the current edited result, clears stale
-evidence after new output, and labels C2PA/SynthID separately from visible watermark detection.
+`main` is at `a04b533`, deployed to pxed (CI run `44867922422` verify/package/deploy-pxed all
+green). SSRF private-host guard rejects k8s cluster names, mDNS and dot-less single-label hosts;
+session lifecycle is pinned by direct contract tests (token hashing at rest, expiry purge).
 
 ## Last Verified
 
-2026-10-20 Asia/Shanghai: 84 tests, TypeScript, frontend/server builds pass. GitHub Actions
-`39319023474` verify/package/deploy-pxed succeeded; pxed revision matches and oneimage/nginx are
-RUNNING. Public health/capabilities returned 200. Public browser QA confirms crop resize/move,
-32px hit targets, 400x300 PNG mosaic preview/export with unchanged outside pixels, 390px mobile fit,
-and no browser exceptions.
+2026-11-21 Asia/Shanghai: 568 tests, TypeScript, frontend/server builds pass. Actions run
+`44867922422` verify/package/deploy-pxed succeeded for `a04b533`. Public healthz/capabilities/site
+all 200. Same day: PR #68 (`fe687cf`) fixed the double subUsage defect (placeholder count +
+excluded.count literal-0 no-op) that made every upstream-timeout refund a 500, added lama warm
+maintenance backoff (15 min doubling to a 4 h cap), and pinned the videogen no-refund timeout
+semantics; PR #67 (`604cda8`) shipped the staged wait experience (four-stage ladder normalized to
+the model's own timeoutMs, live elapsed counter, Gemini-style shimmer preview).
 
 2026-10-21 Asia/Shanghai: Actions `39472672171` verify/package/deploy-pxed all succeeded; pxed
 revision matches and oneimage/nginx are RUNNING. Public health/capabilities returned 200. Public
