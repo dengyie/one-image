@@ -79,3 +79,62 @@ input[type="range"]::-webkit-slider-thumb:hover {
 ::-webkit-scrollbar-thumb:hover {
   background: #52525b;
 }
+
+/* ---- Generation wait state (ImageGenModal) ---- */
+
+/* Sweep light across the shimmer placeholder: a tilted bright band sliding
+   left→right on a loop. The band is wide so the sweep reads as a wash, not a
+   hard stripe. */
+@keyframes generation-shimmer-sweep {
+  0% { transform: translateX(-120%) skewX(-12deg); }
+  100% { transform: translateX(320%) skewX(-12deg); }
+}
+
+.generation-shimmer {
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(52, 211, 153, 0.08) 40%,
+    rgba(255, 255, 255, 0.10) 50%,
+    rgba(52, 211, 153, 0.08) 60%,
+    transparent 80%
+  );
+  animation: generation-shimmer-sweep 2.4s ease-in-out infinite;
+}
+
+/* Sparkle breathes while the sweep runs; slight scale + opacity, no rotation
+   (the loader already owns rotation vocabulary). */
+@keyframes generation-sparkle-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.7; }
+  50% { transform: scale(1.18); opacity: 1; }
+}
+
+.generation-sparkle {
+  animation: generation-sparkle-breathe 1.8s ease-in-out infinite;
+}
+
+/* Stage label enters with a soft fade so the copy swap doesn't flicker. */
+@keyframes generation-stage-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.generation-stage-label {
+  display: inline-block;
+  animation: generation-stage-in 0.35s ease-out;
+}
+
+.generation-stage-icon {
+  animation: generation-sparkle-breathe 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .generation-shimmer,
+  .generation-sparkle,
+  .generation-stage-icon {
+    animation: none;
+  }
+  .generation-stage-label {
+    animation: none;
+  }
+}
