@@ -37,7 +37,8 @@ function createApp(
   if (!options.anonymous) {
     const cookie = authedCookieHeader(appDb.db)
     app.addHook('onRequest', (request, _reply, done) => {
-      request.headers.cookie = cookie
+      // A test may pass its own cookie to exercise a second user.
+      if (request.headers.cookie === undefined) request.headers.cookie = cookie
       done()
     })
   }
@@ -328,7 +329,7 @@ describe('imagegen routes', () => {
     const appDb = initDatabase(':memory:')
     const cookie = authedCookieHeader(appDb.db)
     app.addHook('onRequest', (request, _reply, done) => {
-      request.headers.cookie = cookie
+      if (request.headers.cookie === undefined) request.headers.cookie = cookie
       done()
     })
     registerImagegenRoutes(app, appDb.db, { providers: [provider()], dailyCap: 2, fetchImpl: fetchImpl as unknown as typeof fetch })
@@ -341,12 +342,15 @@ describe('imagegen routes', () => {
     expect(capped.statusCode).toBe(429)
     expect(JSON.parse(capped.body).error).toBe('daily_cap_exceeded')
 
-    // Another client is unaffected.
-    const other = await app.inject({ method: 'POST', url: '/api/v1/imagegen', headers: { 'cf-connecting-ip': '198.51.100.9' }, payload: { provider: 'test', model: 'img-model-1', prompt: 'p' } })
+    // Another signed-in user is unaffected even from the same address: the
+    // ledger is keyed on the user id, not the IP.
+    const otherCookie = authedCookieHeader(appDb.db)
+    const other = await app.inject({ method: 'POST', url: '/api/v1/imagegen', headers: { cookie: otherCookie }, payload: { provider: 'test', model: 'img-model-1', prompt: 'p' } })
     expect(other.statusCode).toBe(502)
 
-    // The cap is durable in SQLite.
-    const rows = appDb.db.prepare('SELECT count FROM imagegen_usage').all() as unknown as { count: number }[]
+    // The cap is durable in SQLite, keyed with the `user:` prefix.
+    const rows = appDb.db.prepare('SELECT count, client_key FROM imagegen_usage').all() as unknown as { count: number; client_key: string }[]
+    expect(rows.every((r) => r.client_key.startsWith('user:'))).toBe(true)
     expect(rows.reduce((acc, r) => acc + r.count, 0)).toBe(3)
     appDb.close()
   })
@@ -365,8 +369,9 @@ describe('imagegen routes', () => {
     // The pre-charge was fully refunded — the ledger is empty again.
     const rows = appDb.db.prepare('SELECT count FROM imagegen_usage').all() as unknown as { count: number }[]
     expect(rows.reduce((acc, r) => acc + r.count, 0)).toBe(0)
-    // And the refunded budget is immediately usable again.
-    const after = appDb.db.prepare('SELECT count FROM imagegen_usage WHERE client_key = ?').all('203.0.113.8') as unknown as { count: number }[]
+    // And the refunded budget is immediately usable again — the user-keyed
+    // bucket is back to zero.
+    const after = appDb.db.prepare("SELECT count FROM imagegen_usage WHERE client_key LIKE 'user:%'").all() as unknown as { count: number }[]
     expect(after.reduce((acc, r) => acc + r.count, 0)).toBe(0)
     appDb.close()
   })

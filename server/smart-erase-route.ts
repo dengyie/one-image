@@ -6,6 +6,7 @@ import { runMiganInpaint } from './lama-inpaint'
 export { resolveLamaModelPath }
 import type { RateLimiter } from './rate-limit'
 import { addUsage, readUsage, resolveUsageClientKey, todayKey } from './usage-ledger'
+import { requireAuth, unauthorized, usageKeyForUser } from './auth-routes'
 
 export interface SmartEraseRouteOptions {
   // Resolved at registration (env + existsSync); null means the surface
@@ -71,6 +72,12 @@ export function registerSmartEraseRoutes(app: FastifyInstance, db: DatabaseSync,
     if (!options.modelPath && !options.miganModelPath) {
       return reply.status(503).send({ error: 'smart_erase_unconfigured', message: '服务端修复模型未配置' })
     }
+    // Same sign-in gate as the generation surfaces: server-side inference
+    // burns shared CPU, so anonymous traffic gets the machine-readable 401
+    // the client turns into the login modal — one policy across every
+    // spend surface.
+    const user = requireAuth(request, db)
+    if (!user) return unauthorized(reply, '智能修复功能需要登录后使用，请先注册或登录')
     // Engine selection: lama (默认/高质量) or migan (标准的服务端形态). An
     // unknown value degrades to lama rather than failing.
     const engine = (request.body as { engine?: string } | undefined)?.engine === 'migan' ? 'migan' : 'lama'
@@ -109,7 +116,8 @@ export function registerSmartEraseRoutes(app: FastifyInstance, db: DatabaseSync,
 
     // Billed before the run, like every other spend surface: inference burns
     // shared CPU, and a failed or slow run must not be cheaper than abuse.
-    const clientKey = resolveUsageClientKey(request)
+    // Keyed on the signed-in user, same as the generation ledgers.
+    const clientKey = usageKeyForUser(user)
     const day = todayKey(new Date())
     const used = readUsage(db, 'smarterase_usage', clientKey, day)
     if (used >= options.dailyCap) {

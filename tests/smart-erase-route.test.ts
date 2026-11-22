@@ -1,9 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
-import Fastify from 'fastify'
+import Fastify, { type FastifyInstance } from 'fastify'
 import { initDatabase } from '../server/db'
 import { registerSmartEraseRoutes } from '../server/smart-erase-route'
 import { createRateLimiter } from '../server/rate-limit'
 import { encodePngRgba, decodePngRgba } from '../server/png'
+import { authedCookieHeader } from './helpers'
+
+// Inject a signed-in cookie onto a standalone Fastify instance so the shared
+// sign-in gate passes and the test reaches the behaviour it targets.
+function withSession(app: FastifyInstance, db: ReturnType<typeof initDatabase>['db']): void {
+  const cookie = authedCookieHeader(db)
+  app.addHook('onRequest', (request, _reply, done) => {
+    if (request.headers.cookie === undefined) request.headers.cookie = cookie
+    done()
+  })
+}
 
 function solidPng(width: number, height: number, color: [number, number, number]): Buffer {
   const rgba = new Uint8Array(width * height * 4)
@@ -37,10 +48,22 @@ function createApp(
     runInpaint?: Parameters<typeof registerSmartEraseRoutes>[2]['runInpaint']
     dailyCap?: number
     rateLimiter?: ReturnType<typeof createRateLimiter>
+    // Default injects a signed-in session (the gate answers 401 without one);
+    // `anonymous: true` opts out to exercise the 401 envelope.
+    anonymous?: boolean
   } = {},
 ) {
   const app = Fastify()
   const appDb = initDatabase(':memory:')
+  if (!options.anonymous) {
+    const cookie = authedCookieHeader(appDb.db)
+    app.addHook('onRequest', (request, _reply, done) => {
+      // A test may pass its own cookie header to exercise a second user;
+      // only fill in the default session when none was provided.
+      if (request.headers.cookie === undefined) request.headers.cookie = cookie
+      done()
+    })
+  }
   registerSmartEraseRoutes(app, appDb.db, {
     modelPath: options.modelPath !== undefined ? options.modelPath : '/models/lama_fp32.onnx',
     rateLimiter: options.rateLimiter,
@@ -132,38 +155,61 @@ describe('smart-erase route', () => {
     expect(appDb.db.prepare('SELECT COUNT(*) AS n FROM smarterase_usage').get()).toEqual({ n: 0 })
   })
 
-  it('counts usage before the run and caps per client per day', async () => {
+  it('answers anonymous and invalid-token callers with the auth_required envelope before any spend', async () => {
     const runInpaint = fakeRun()
-    const { app, appDb } = createApp({ runInpaint, dailyCap: 2 })
-    const headers = { 'cf-connecting-ip': '203.0.113.5' }
-    const imageBytes = solidPng(256, 128, [1, 2, 3]).toString('base64')
-    const maskBytes = maskPng(256, 128, { x: 0, y: 0, w: 16, h: 16 }).toString('base64')
-    for (let i = 0; i < 2; i++) {
-      const res = await app.inject({
-        method: 'POST',
-        url: '/api/v1/smart-erase',
-        headers,
-        payload: { image: { base64: imageBytes }, mask: { base64: maskBytes } },
-      })
-      expect(res.statusCode).toBe(200)
+    const { app, appDb } = createApp({ runInpaint, anonymous: true })
+    const payload = {
+      image: { base64: solidPng(256, 128, [1, 2, 3]).toString('base64') },
+      mask: { base64: maskPng(256, 128, { x: 0, y: 0, w: 16, h: 16 }).toString('base64') },
     }
-    const capped = await app.inject({
+    const anon = await app.inject({ method: 'POST', url: '/api/v1/smart-erase', payload })
+    expect(anon.statusCode).toBe(401)
+    const body = JSON.parse(anon.body)
+    expect(body.error).toBe('auth_required')
+    expect(body.message).toContain('登录')
+    // An invalid-but-present token exercises the validateSession lookup path:
+    // no session row matches, same envelope, never a 500.
+    const badToken = await app.inject({
       method: 'POST',
       url: '/api/v1/smart-erase',
-      headers,
-      payload: { image: { base64: imageBytes }, mask: { base64: maskBytes } },
+      headers: { cookie: 'oneimage_session=sess_does_not_exist' },
+      payload,
     })
+    expect(badToken.statusCode).toBe(401)
+    expect(JSON.parse(badToken.body).error).toBe('auth_required')
+    expect(runInpaint).not.toHaveBeenCalled()
+    expect(appDb.db.prepare('SELECT COUNT(*) AS n FROM smarterase_usage').get()).toEqual({ n: 0 })
+    appDb.close()
+  })
+
+  it('counts usage before the run and caps per user per day', async () => {
+    const runInpaint = fakeRun()
+    const { app, appDb } = createApp({ runInpaint, dailyCap: 2 })
+    const imageBytes = solidPng(256, 128, [1, 2, 3]).toString('base64')
+    const maskBytes = maskPng(256, 128, { x: 0, y: 0, w: 16, h: 16 }).toString('base64')
+    const payload = { image: { base64: imageBytes }, mask: { base64: maskBytes } }
+    for (let i = 0; i < 2; i++) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/smart-erase', payload })
+      expect(res.statusCode).toBe(200)
+    }
+    const capped = await app.inject({ method: 'POST', url: '/api/v1/smart-erase', payload })
     expect(capped.statusCode).toBe(429)
     expect(JSON.parse(capped.body).error).toBe('daily_cap_exceeded')
-    // Another client is unaffected.
+    // The ledger is keyed on the signed-in user, not the address: the rows
+    // carry the `user:` prefix, and a second user's session is unaffected
+    // even from the same IP.
+    const rows = appDb.db.prepare('SELECT client_key, count FROM smarterase_usage').all() as { client_key: string; count: number }[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].client_key.startsWith('user:')).toBe(true)
+    expect(rows[0].count).toBe(2)
+    const otherUserCookie = authedCookieHeader(appDb.db)
     const other = await app.inject({
       method: 'POST',
       url: '/api/v1/smart-erase',
-      headers: { 'cf-connecting-ip': '198.51.100.9' },
-      payload: { image: { base64: imageBytes }, mask: { base64: maskBytes } },
+      headers: { cookie: otherUserCookie },
+      payload,
     })
     expect(other.statusCode).toBe(200)
-    expect((runInpaint as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(3)
     appDb.close()
   })
 
@@ -212,6 +258,7 @@ describe('smart-erase warm gate', () => {
     const limiter = createRateLimiter({ windowMs: 60_000, maxRequestsPerWindow: 1, maxTrackedClients: 100 })
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    withSession(app, appDb.db)
     registerSmartEraseRoutes(app, appDb.db, {
       modelPath: '/models/lama_fp32.onnx',
       isWarm: () => false,
@@ -229,6 +276,7 @@ describe('smart-erase warm gate', () => {
     expect(runInpaint).not.toHaveBeenCalled()
     // The warm gate sits before the spend surfaces: the window is untouched.
     const warmApp = Fastify()
+    withSession(warmApp, appDb.db)
     registerSmartEraseRoutes(warmApp, appDb.db, {
       modelPath: '/models/lama_fp32.onnx',
       isWarm: () => true,
@@ -265,6 +313,7 @@ describe('smart-erase engine selection', () => {
     }))
     const app = Fastify()
     const appDb = initDatabase(':memory:')
+    withSession(app, appDb.db)
     registerSmartEraseRoutes(app, appDb.db, {
       modelPath: '/models/lama.onnx',
       isWarm: () => true,

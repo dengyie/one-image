@@ -4,8 +4,8 @@ import type { ImagegenProviderConfig, ImagegenModelSpec } from './imagegen-confi
 import { captionImage, generateImages, ImagegenUpstreamError, type ImageInput } from './imagegen-providers'
 import { sniffImage } from './image-meta'
 import type { RateLimiter } from './rate-limit'
-import { addUsage, readUsage, resolveUsageClientKey, subUsage, todayKey } from './usage-ledger'
-import { extractSessionToken, requireAuth, unauthorized } from './auth-routes'
+import { addUsage, readUsage, resolveUsageClientKey, todayKey, subUsage } from './usage-ledger'
+import { extractSessionToken, requireAuth, unauthorized, usageKeyForUser } from './auth-routes'
 
 // Generation spends real operator money, so every consuming endpoint requires
 // a signed-in account: anonymous traffic is pointed at the auth surface with a
@@ -149,11 +149,14 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
   // The usage ledger is otherwise write-only from the browser's point of view;
   // exposing the remaining budget lets the picker say "今日剩余 N 张" instead
   // of teaching the quota through a 429. A plain read, no rate limiter needed.
+  // The ledger is keyed on user id, so an anonymous visitor reads an always-
+  // empty IP key — they cannot spend anyway behind the sign-in gate.
   app.get('/api/v1/imagegen/quota', async (request: FastifyRequest, reply: FastifyReply) => {
     if (imageProviders().length === 0) {
       return reply.status(503).send({ error: 'imagegen_unconfigured', message: '生图服务未配置' })
     }
-    const clientKey = resolveUsageClientKey(request)
+    const user = requireAuth(request, db)
+    const clientKey = user ? usageKeyForUser(user) : resolveUsageClientKey(request)
     const day = todayKey(new Date())
     const used = readUsage(db, 'imagegen_usage', clientKey, day)
     return reply.status(200).send({ used, cap: options.dailyCap, remaining: Math.max(0, options.dailyCap - used) })
@@ -172,7 +175,8 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (imageProviders().length === 0) {
       return reply.status(503).send({ error: 'imagegen_unconfigured', message: '生图服务未配置' })
     }
-    if (!requireAuth(request, db)) return unauthorized(reply, '生成功能需要登录后使用，请先注册或登录')
+    const user = requireAuth(request, db)
+    if (!user) return unauthorized(reply, '生成功能需要登录后使用，请先注册或登录')
     if (rateLimiter && !rateLimiter.allow(request)) {
       return reply.header('Retry-After', '60').status(429).send({
         error: 'rate_limited',
@@ -230,10 +234,12 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
       return reply.status(400).send({ error: 'image_input_unsupported', message: '该模型不接受参考图' })
     }
 
-    // Durable daily cap keyed on the resolved client address, counted in
-    // *images* rather than requests: n=4 spends four upstream generations and
-    // is billed as four, so one 4-image request must not cost a single unit.
-    const clientKey = resolveUsageClientKey(request)
+    // Durable daily cap keyed on the signed-in user (the gate above makes the
+    // identity available and makes IP-keying pointless — NAT shares one key
+    // for a whole office), counted in *images* rather than requests: n=4
+    // spends four upstream generations and is billed as four, so one 4-image
+    // request must not cost a single unit.
+    const clientKey = usageKeyForUser(user)
     const day = todayKey(new Date())
     const used = readUsage(db, 'imagegen_usage', clientKey, day)
     if (used >= options.dailyCap) {
@@ -314,7 +320,8 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (captionProviders.length === 0) {
       return reply.status(503).send({ error: 'caption_unconfigured', message: '图片描述服务未配置' })
     }
-    if (!requireAuth(request, db)) return unauthorized(reply, '生成功能需要登录后使用，请先注册或登录')
+    const user = requireAuth(request, db)
+    if (!user) return unauthorized(reply, '生成功能需要登录后使用，请先注册或登录')
     if (rateLimiter && !rateLimiter.allow(request)) {
       return reply.header('Retry-After', '60').status(429).send({
         error: 'rate_limited',

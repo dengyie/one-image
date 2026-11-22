@@ -979,6 +979,12 @@ export function App() {
         onStage: setSmartEraseStage,
       })
       if (!outcome.ok) {
+        // Same sign-in gate as generation: open the login modal instead of a
+        // dead-end error toast.
+        if (outcome.reason === 'needs-auth') {
+          setShowAuthModal(true)
+          return
+        }
         showToast('选区为空：请先涂抹或框选水印', 'info')
         return
       }
