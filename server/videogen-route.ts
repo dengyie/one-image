@@ -4,7 +4,7 @@ import type { ImagegenProviderConfig, ImagegenModelSpec } from './imagegen-confi
 import { generateVideo, ImagegenUpstreamError } from './imagegen-providers'
 import type { RateLimiter } from './rate-limit'
 import { addUsage, readUsage, resolveUsageClientKey, todayKey } from './usage-ledger'
-import { requireAuth, unauthorized } from './auth-routes'
+import { requireAuth, unauthorized, usageKeyForUser } from './auth-routes'
 
 // Same sign-in gate as the image surface: video costs even more per call, so
 // anonymous traffic gets the machine-readable 401 the client turns into the
@@ -54,7 +54,8 @@ export function registerVideogenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (!hasVideoModels) {
       return reply.status(503).send({ error: 'videogen_unconfigured', message: '视频生成服务未配置' })
     }
-    if (!requireAuth(request, db)) return unauthorized(reply, '视频生成功能需要登录后使用，请先注册或登录')
+    const user = requireAuth(request, db)
+    if (!user) return unauthorized(reply, '视频生成功能需要登录后使用，请先注册或登录')
     if (rateLimiter && !rateLimiter.allow(request)) {
       return reply.header('Retry-After', '60').status(429).send({
         error: 'rate_limited',
@@ -82,7 +83,8 @@ export function registerVideogenRoutes(app: FastifyInstance, db: DatabaseSync, o
 
     // One clip per request; the durable ledger keeps the same shape as the
     // image one so the quota endpoint and the cap checks stay symmetrical.
-    const clientKey = resolveUsageClientKey(request)
+    // Keyed on the signed-in user, same as the image ledger.
+    const clientKey = usageKeyForUser(user)
     const day = todayKey(new Date())
     const used = readUsage(db, 'videogen_usage', clientKey, day)
     if (used >= options.dailyCap) {
@@ -133,7 +135,8 @@ export function registerVideogenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (!hasVideoModels) {
       return reply.status(503).send({ error: 'videogen_unconfigured', message: '视频生成服务未配置' })
     }
-    const clientKey = resolveUsageClientKey(request)
+    const user = requireAuth(request, db)
+    const clientKey = user ? usageKeyForUser(user) : resolveUsageClientKey(request)
     const day = todayKey(new Date())
     const used = readUsage(db, 'videogen_usage', clientKey, day)
     return reply.status(200).send({ used, cap: options.dailyCap, remaining: Math.max(0, options.dailyCap - used) })

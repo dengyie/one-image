@@ -36,10 +36,18 @@ export function extractSessionToken(request: FastifyRequest): string | null {
 // Generation endpoints spend real operator money, so consuming routes share
 // one gate: a valid session token is required, and anonymous/expired traffic
 // gets a machine-readable 401 envelope the client turns into the login modal.
-export function requireAuth(request: FastifyRequest, db: DatabaseSync): boolean {
+// Returns the signed-in user so the caller can key its durable spend ledger
+// on a stable identity instead of a spoofable IP.
+export function requireAuth(request: FastifyRequest, db: DatabaseSync): SafeUser | null {
   const token = extractSessionToken(request)
-  if (!token) return false
-  return validateSession(db, token) !== null
+  if (!token) return null
+  return validateSession(db, token)
+}
+
+// Ledger keyspace for a signed-in user. The `user:` prefix keeps it disjoint
+// from legacy IP keys in the same tables.
+export function usageKeyForUser(user: SafeUser): string {
+  return `user:${user.id}`
 }
 
 export function unauthorized(reply: FastifyReply, message: string): void {

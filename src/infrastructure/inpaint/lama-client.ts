@@ -109,7 +109,7 @@ export interface ServerLamaResponse {
 export async function postServerLama(
   payload: { imageBase64: string; maskBase64: string; engine?: 'lama' | 'migan' },
   options: { timeoutMs?: number; signal?: AbortSignal } = {},
-): Promise<{ ok: boolean; data?: ServerLamaResponse; message?: string }> {
+): Promise<{ ok: boolean; data?: ServerLamaResponse; message?: string; needsAuth?: boolean }> {
   const signals = [options.signal, typeof options.timeoutMs === 'number' ? AbortSignal.timeout(options.timeoutMs) : undefined].filter(
     (s): s is AbortSignal => !!s,
   )
@@ -122,8 +122,13 @@ export async function postServerLama(
       body: JSON.stringify({ image: { base64: payload.imageBase64 }, mask: { base64: payload.maskBase64 }, engine: payload.engine ?? 'lama' }),
       signal,
     })
-    const data = (await res.json().catch(() => null)) as { message?: string; image?: { mimeType: string; base64: string } } | null
+    const data = (await res.json().catch(() => null)) as { error?: string; message?: string; image?: { mimeType: string; base64: string } } | null
     if (!res.ok || !data?.image) {
+      // Same sign-in gate as generation: the 401 auth_required envelope hands
+      // off to the login modal instead of a dead-end error.
+      if (res.status === 401 || data?.error === 'auth_required') {
+        return { ok: false, message: data?.message || '请先登录后再使用智能修复', needsAuth: true }
+      }
       return { ok: false, message: data?.message || `服务端修复失败（HTTP ${res.status}）` }
     }
     return { ok: true, data: { image: data.image } }

@@ -31,6 +31,7 @@ export interface EraseRunInput {
 
 export type EraseRunOutcome =
   | { ok: false; reason: 'empty-selection' }
+  | { ok: false; reason: 'needs-auth' }
   | { ok: true; resultFile: File; provider: FillProvider; regions: number; clearedMask: AnnotationLayer[] }
 
 export async function runErasePipeline(input: EraseRunInput): Promise<EraseRunOutcome> {
@@ -144,6 +145,8 @@ export async function runErasePipeline(input: EraseRunInput): Promise<EraseRunOu
     // the 标准 tier kept its offline guarantee, the server tier is an
     // optimization (no model download, native inference) layered on top.
     if (!response.ok && serverEngine === 'migan') {
+      // The 标准 tier keeps its offline guarantee: an auth wall (or any
+      // server failure) degrades to the on-device worker, never blocks.
       const fallback = await runSmartErase(
         { image: imageData, mask: maskData, composite: alphaData, provider: 'migan' },
         onStage
@@ -151,6 +154,7 @@ export async function runErasePipeline(input: EraseRunInput): Promise<EraseRunOu
       result = fallback
     } else {
       if (!response.ok || !response.data) {
+        if (response.needsAuth) return { ok: false, reason: 'needs-auth' }
         throw new Error(response.message ?? '服务端修复失败')
       }
     const filledBlob = await (async () => {

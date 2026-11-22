@@ -55,7 +55,8 @@ function createApp(
   if (!options.anonymous) {
     const cookie = authedCookieHeader(appDb.db)
     app.addHook('onRequest', (request, _reply, done) => {
-      request.headers.cookie = cookie
+      // A test may pass its own cookie to exercise a second user.
+      if (request.headers.cookie === undefined) request.headers.cookie = cookie
       done()
     })
   }
@@ -135,19 +136,21 @@ describe('videogen routes', () => {
 
   it('rejects the request before any spend once the daily cap is reached', async () => {
     const fetchImpl = upstreamFetch()
-    const { app } = createApp([provider()], { fetchImpl, dailyCap: 1 })
-    const headers = { 'cf-connecting-ip': '203.0.113.5' }
-    const first = await app.inject({ method: 'POST', url: '/api/v1/videogen', headers, payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })
+    const { app, appDb } = createApp([provider()], { fetchImpl, dailyCap: 1 })
+    const first = await app.inject({ method: 'POST', url: '/api/v1/videogen', payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })
     expect(first.statusCode).toBe(200)
-    const capped = await app.inject({ method: 'POST', url: '/api/v1/videogen', headers, payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })
+    const capped = await app.inject({ method: 'POST', url: '/api/v1/videogen', payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })
     expect(capped.statusCode).toBe(429)
     expect(JSON.parse(capped.body).error).toBe('daily_cap_exceeded')
-    // Another client is unaffected.
-    const other = await app.inject({ method: 'POST', url: '/api/v1/videogen', headers: { 'cf-connecting-ip': '198.51.100.9' }, payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })
+    // Another signed-in user is unaffected: the ledger is keyed on the user
+    // id, not the IP.
+    const otherCookie = authedCookieHeader(appDb.db)
+    const other = await app.inject({ method: 'POST', url: '/api/v1/videogen', headers: { cookie: otherCookie }, payload: { provider: 'mangoapi', model: 'grok-imagine-video', prompt: 'p' } })
     expect(other.statusCode).toBe(200)
     // Exactly the two successful generations hit the upstream.
     const calls = (fetchImpl as unknown as { mock: { calls: unknown[] } }).mock.calls
     expect(calls).toHaveLength(4) // 2 × (chat POST + media download)
+    appDb.close()
   })
 
   it('rate limits bursts per client', async () => {
