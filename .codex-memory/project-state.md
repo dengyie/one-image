@@ -16,27 +16,24 @@ disabled state (PR #72 — edit=false models render a dimmed reference section n
 edit-capable models instead of silently hiding it), the generation sign-in gate (PR #73 —
 imagegen/videogen/caption answer anonymous calls with 401 auth_required before the rate limiter
 and ledger; both modals hand off to the login modal via onNeedAuth; capabilities/quota stay
-public), and the review close-out (PR #74 — captionImage.needsAuth consumed in the regenerate
+public), the review close-out (PR #74 — captionImage.needsAuth consumed in the regenerate
 prefill, shared requireAuth/unauthorized helpers in auth-routes.ts, badge row keyed on
 modelInfo, reference disabled state gated on capsLoaded via referenceReady, invalid-token 401
-case). SSRF host-guard hardening + auth session contract tests (`a04b533`). 575 tests green.
+case), and the spend-auth policy decisions (PR #75 — smart-erase joins the sign-in gate with
+the same auth_required envelope, all three ledgers key on user:{id} instead of IP,
+requireAuth returns SafeUser, MI-GAN 标准 tier degrades to the on-device worker behind the
+auth wall). SSRF host-guard hardening + auth session contract tests (`a04b533`). 576 tests green.
 
 ## Current Branch
 
-`main` is at PR #74's squash (`af46bc0`), deployed to pxed (CI run `45013586373` — verify/package/
-deploy-pxed all green; the deploy upload leg ran ~40 min on the NFS receiver, well within normal).
-Online: anonymous imagegen/videogen POST return 401 auth_required (invalid tokens too —
-validateSession lookup path), capabilities/quota/healthz stay 200.
-
-## Owner decisions pending
-
-- Whether smart-erase (LaMa) should carry the same sign-in gate as generation.
-- Whether the quota ledger key should move from IP to user id (product decision; the gate now
-  makes a user key feasible).
+`main` is at PR #75's squash (`248b743`), deployed to pxed (CI run `45081814965` — verify/package/
+deploy-pxed all green). Online: anonymous smart-erase/imagegen/videogen POST return 401
+auth_required, capabilities/quota/healthz stay 200. Spend ledgers are user-keyed; owner
+decisions from the PR #74 review are both resolved (no longer pending).
 
 ## Last Verified
 
-2026-11-21 Asia/Shanghai: 568 tests, TypeScript, frontend/server builds pass. Actions run
+2026-11-23 Asia/Shanghai: 576 tests, TypeScript, frontend/server builds pass. Actions run
 `44867922422` verify/package/deploy-pxed succeeded for `a04b533`. Public healthz/capabilities/site
 all 200. Same day: PR #68 (`fe687cf`) fixed the double subUsage defect (placeholder count +
 excluded.count literal-0 no-op) that made every upstream-timeout refund a 500, added lama warm
