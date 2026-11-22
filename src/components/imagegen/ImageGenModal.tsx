@@ -151,6 +151,10 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
   const provider = caps?.providers.find((p) => p.id === providerId)
   const modelInfo: ImagegenModelInfo | undefined = provider?.modelInfos.find((m) => m.id === model)
   const supportsEdit = modelInfo?.edit ?? false
+  // Before capabilities land, `edit` is unknown — not false. Optimistically
+  // render the interactive reference UI during that window so the disabled
+  // "当前模型不支持参考图" copy never flashes on a model that may support it.
+  const referenceReady = capsLoaded && supportsEdit
   // Capabilities drive everything per model; the provider-level fields are
   // only a fallback for a server that has not deployed modelInfos yet.
   const sizes = modelInfo?.sizes ?? provider?.sizes ?? []
@@ -335,7 +339,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
               </label>
             </div>
 
-            {(modelInfo.note || supportsEdit) && (
+            {modelInfo && (
               <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                 {supportsEdit ? (
                   <span className="rounded-full bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-emerald-300">支持参考图</span>
@@ -397,16 +401,16 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs text-zinc-400">参考图</span>
-                {supportsEdit && reference && (
+                {referenceReady && reference && (
                   <button onClick={() => setReference(null)} className="text-[11px] text-zinc-500 hover:text-zinc-200 transition-colors">
                     移除
                   </button>
                 )}
               </div>
               <div
-                onDragOver={supportsEdit ? (e) => e.preventDefault() : undefined}
+                onDragOver={referenceReady ? (e) => e.preventDefault() : undefined}
                 onDrop={
-                  supportsEdit
+                  referenceReady
                     ? (e) => {
                         e.preventDefault()
                         useFile(e.dataTransfer.files?.[0])
@@ -414,12 +418,12 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({
                     : undefined
                 }
                 className={
-                  supportsEdit
-                    ? 'rounded-xl border border-dashed border-zinc-700 bg-zinc-800/40 p-3 space-y-2'
-                    : 'rounded-xl border border-dashed border-zinc-800 bg-zinc-900/40 p-3 opacity-60'
+                  capsLoaded && !referenceReady
+                    ? 'rounded-xl border border-dashed border-zinc-800 bg-zinc-900/40 p-3 opacity-60'
+                    : 'rounded-xl border border-dashed border-zinc-700 bg-zinc-800/40 p-3 space-y-2'
                 }
               >
-                {!supportsEdit ? (
+                {capsLoaded && !referenceReady ? (
                   <div className="text-[11px] text-zinc-500 leading-relaxed">
                     当前模型不支持参考图（图生图）。
                     {editModels.length > 0

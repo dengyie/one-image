@@ -4,19 +4,11 @@ import type { ImagegenProviderConfig, ImagegenModelSpec } from './imagegen-confi
 import { generateVideo, ImagegenUpstreamError } from './imagegen-providers'
 import type { RateLimiter } from './rate-limit'
 import { addUsage, readUsage, resolveUsageClientKey, todayKey } from './usage-ledger'
-import { extractSessionToken } from './auth-routes'
-import { validateSession } from './auth'
+import { requireAuth, unauthorized } from './auth-routes'
 
 // Same sign-in gate as the image surface: video costs even more per call, so
 // anonymous traffic gets the machine-readable 401 the client turns into the
-// login modal.
-function unauthorized(reply: FastifyReply): { ok: false } {
-  reply.status(401).send({
-    error: 'auth_required',
-    message: '视频生成功能需要登录后使用，请先注册或登录',
-  })
-  return { ok: false }
-}
+// login modal. The shared helpers live in auth-routes.ts.
 
 export interface VideogenRouteOptions {
   providers: ImagegenProviderConfig[]
@@ -62,9 +54,7 @@ export function registerVideogenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (!hasVideoModels) {
       return reply.status(503).send({ error: 'videogen_unconfigured', message: '视频生成服务未配置' })
     }
-    const sessionToken = extractSessionToken(request)
-    const user = sessionToken ? validateSession(db, sessionToken) : null
-    if (!user) return unauthorized(reply)
+    if (!requireAuth(request, db)) return unauthorized(reply, '视频生成功能需要登录后使用，请先注册或登录')
     if (rateLimiter && !rateLimiter.allow(request)) {
       return reply.header('Retry-After', '60').status(429).send({
         error: 'rate_limited',

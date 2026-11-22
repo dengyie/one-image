@@ -33,6 +33,19 @@ export function extractSessionToken(request: FastifyRequest): string | null {
   return null
 }
 
+// Generation endpoints spend real operator money, so consuming routes share
+// one gate: a valid session token is required, and anonymous/expired traffic
+// gets a machine-readable 401 envelope the client turns into the login modal.
+export function requireAuth(request: FastifyRequest, db: DatabaseSync): boolean {
+  const token = extractSessionToken(request)
+  if (!token) return false
+  return validateSession(db, token) !== null
+}
+
+export function unauthorized(reply: FastifyReply, message: string): void {
+  reply.status(401).send({ error: 'auth_required', message })
+}
+
 function setSessionCookie(reply: FastifyReply, token: string): void {
   reply.header(
     'Set-Cookie',
