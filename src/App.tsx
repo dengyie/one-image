@@ -1394,6 +1394,13 @@ export function App() {
         }
         const prepared = await prepareReferenceImage(source)
         const result = await captionImage({ image: { mimeType: prepared.mimeType, base64: prepared.base64 }, timeoutMs: 45_000 })
+        // Same sign-in gate as generate/caption inside the modal: hand the
+        // anonymous visitor to the login modal instead of opening the gen
+        // surface just to dead-end there.
+        if (result.needsAuth) {
+          setShowAuthModal(true)
+          return
+        }
         if (result.ok && result.data?.caption) caption = result.data.caption
         else showToast(`自动描述失败：${result.message ?? '未知原因'}；可手动描述画面后生成`, 'info')
       } catch (err: unknown) {

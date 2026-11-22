@@ -5,25 +5,13 @@ import { captionImage, generateImages, ImagegenUpstreamError, type ImageInput } 
 import { sniffImage } from './image-meta'
 import type { RateLimiter } from './rate-limit'
 import { addUsage, readUsage, resolveUsageClientKey, subUsage, todayKey } from './usage-ledger'
-import { extractSessionToken } from './auth-routes'
-import { validateSession } from './auth'
+import { extractSessionToken, requireAuth, unauthorized } from './auth-routes'
 
 // Generation spends real operator money, so every consuming endpoint requires
 // a signed-in account: anonymous traffic is pointed at the auth surface with a
-// machine-readable envelope the client turns into the login modal. Read-only
-// endpoints (capabilities / quota) stay public.
-function requireAuth(request: FastifyRequest, db: DatabaseSync): boolean {
-  const token = extractSessionToken(request)
-  if (!token) return false
-  return validateSession(db, token) !== null
-}
-
-function unauthorized(reply: FastifyReply): void {
-  reply.status(401).send({
-    error: 'auth_required',
-    message: '生成功能需要登录后使用，请先注册或登录',
-  })
-}
+// machine-readable envelope the client turns into the login modal. The shared
+// gate/401 helpers live in auth-routes.ts; read-only endpoints (capabilities /
+// quota) stay public.
 
 export interface ImagegenRouteOptions {
   providers: ImagegenProviderConfig[]
@@ -184,7 +172,7 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (imageProviders().length === 0) {
       return reply.status(503).send({ error: 'imagegen_unconfigured', message: '生图服务未配置' })
     }
-    if (!requireAuth(request, db)) return unauthorized(reply)
+    if (!requireAuth(request, db)) return unauthorized(reply, '生成功能需要登录后使用，请先注册或登录')
     if (rateLimiter && !rateLimiter.allow(request)) {
       return reply.header('Retry-After', '60').status(429).send({
         error: 'rate_limited',
@@ -326,7 +314,7 @@ export function registerImagegenRoutes(app: FastifyInstance, db: DatabaseSync, o
     if (captionProviders.length === 0) {
       return reply.status(503).send({ error: 'caption_unconfigured', message: '图片描述服务未配置' })
     }
-    if (!requireAuth(request, db)) return unauthorized(reply)
+    if (!requireAuth(request, db)) return unauthorized(reply, '生成功能需要登录后使用，请先注册或登录')
     if (rateLimiter && !rateLimiter.allow(request)) {
       return reply.header('Retry-After', '60').status(429).send({
         error: 'rate_limited',

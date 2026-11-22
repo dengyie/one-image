@@ -120,6 +120,18 @@ describe('imagegen routes', () => {
     expect(caps.statusCode).toBe(200)
     const quota = await app.inject({ method: 'GET', url: '/api/v1/imagegen/quota' })
     expect(quota.statusCode).toBe(200)
+
+    // A present-but-invalid token exercises the validateSession lookup path:
+    // the sha256-hashed token matches no session row, so it gets the same 401
+    // envelope as a missing one — never a 500.
+    const badToken = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imagegen',
+      payload: { provider: 'test', model: 'img-model-1', prompt: 'p' },
+      headers: { cookie: 'oneimage_session=sess_does_not_exist' },
+    })
+    expect(badToken.statusCode).toBe(401)
+    expect(JSON.parse(badToken.body).error).toBe('auth_required')
   })
 
   it('validates the request contract before spending money', async () => {
