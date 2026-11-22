@@ -13,17 +13,26 @@ video timeout retry UX (PR #70 — generateVideo surfaces timedOut; the modal sh
 and a retry button), the elapsed-time echo into the completion toast (PR #71 — the route
 returns elapsedMs, the toast appends a humanized 耗时 segment), the reference-picker
 disabled state (PR #72 — edit=false models render a dimmed reference section naming the
-edit-capable models instead of silently hiding it), and the generation sign-in gate (PR #73 —
+edit-capable models instead of silently hiding it), the generation sign-in gate (PR #73 —
 imagegen/videogen/caption answer anonymous calls with 401 auth_required before the rate limiter
 and ledger; both modals hand off to the login modal via onNeedAuth; capabilities/quota stay
-public). SSRF host-guard hardening + auth session contract tests (`a04b533`). 575 tests green.
+public), and the review close-out (PR #74 — captionImage.needsAuth consumed in the regenerate
+prefill, shared requireAuth/unauthorized helpers in auth-routes.ts, badge row keyed on
+modelInfo, reference disabled state gated on capsLoaded via referenceReady, invalid-token 401
+case). SSRF host-guard hardening + auth session contract tests (`a04b533`). 575 tests green.
 
 ## Current Branch
 
-`main` is at PR #73's squash (`43db388`), deployed to pxed (CI run `44961953439` — verify/package/
-deploy-pxed all green in one pass). Online: anonymous imagegen/videogen POST return 401
-auth_required, capabilities/quota/healthz stay 200; browser-verified that the anonymous generate
-flow opens the login modal.
+`main` is at PR #74's squash (`af46bc0`), deployed to pxed (CI run `45013586373` — verify/package/
+deploy-pxed all green; the deploy upload leg ran ~40 min on the NFS receiver, well within normal).
+Online: anonymous imagegen/videogen POST return 401 auth_required (invalid tokens too —
+validateSession lookup path), capabilities/quota/healthz stay 200.
+
+## Owner decisions pending
+
+- Whether smart-erase (LaMa) should carry the same sign-in gate as generation.
+- Whether the quota ledger key should move from IP to user id (product decision; the gate now
+  makes a user key feasible).
 
 ## Last Verified
 
